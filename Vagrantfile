@@ -202,7 +202,10 @@ Vagrant.configure('2') do |config|
     # order stays rac1→rac2: serial `vagrant up` boots node1 first, which
     # owns cluster formation.
     config.vm.define node_name, primary: (node_name == NODES.keys.first) do |cfg|
-      cfg.vm.hostname = node[:fqdn]
+      cfg.vm.hostname = node_name   # SHORT (== CRS nodename) — dbca ssh
+      # equality check requires uname==CRS name (db11g pattern); FQDN
+      # here breaks RAC create with INS-06006<->DBT-14101 ping-pong
+      # (di 2026-10-26).
 
       cfg.vm.network 'private_network', ip: node[:public_ip]
       cfg.vm.network 'private_network', ip: node[:private_ip],
