@@ -133,12 +133,12 @@
   # (04 run-3 2026-10-26). Static fstatat wrappers appended to the home's
   # sysliblist resolve it; RU 19.31 replaces the object at patch phase.
   shell: |
-    printf '#include <sys/stat.h>\n#include <fcntl.h>\nint stat(const char *p, struct stat *s){return fstatat(AT_FDCWD,p,s,0);}\nint lstat(const char *p, struct stat *s){return fstatat(AT_FDCWD,p,s,AT_SYMLINK_NOFOLLOW);}\n' > {{ grid_install_tmp }}/statshim.c
-    cc -c -fPIC {{ grid_install_tmp }}/statshim.c -o {{ grid_install_tmp }}/statshim.o
+    printf '#include <sys/syscall.h>\n#include <sys/stat.h>\n#include <fcntl.h>\n#include <unistd.h>\nstatic int xst(const char *p, struct stat *s, int f){return syscall(SYS_newfstatat, AT_FDCWD, p, s, f);}\nint stat(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint stat64(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat64(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\n' > {{ grid_install_tmp }}/statshim.c
+    cc -fPIC -c {{ grid_install_tmp }}/statshim.c -o {{ grid_install_tmp }}/statshim.o
+    # run-5 lesson: glibc>=2.33 does not EXPORT fstatat either — the
+    # wrapper must issue SYS_newfstatat directly via syscall(2).
     ar rcs {{ oracle_home }}/lib/libstatshim.a {{ grid_install_tmp }}/statshim.o
     grep -q statshim {{ oracle_home }}/lib/sysliblist || echo -n ' -lstatshim' >> {{ oracle_home }}/lib/sysliblist
-  args:
-    creates: "{{ oracle_home }}/lib/libstatshim.a"
   become_user: oracle
   when:
     - db_phase == 'software'
