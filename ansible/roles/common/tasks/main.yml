@@ -80,7 +80,13 @@
     enabled: yes
 
 - name: Find NM connection per NIC
-  shell: nmcli -g NAME,GENERAL.DEVICES device status | awk '$2=="{{ item }}" {print $1; exit}'
+  # 'nmcli -g NAME,DEVICE' emits one COLON-joined line, not columns
+  # (first-run lesson 2026-10-26: awk on whitespace -> empty name ->
+  # 'nmcli con mod ""' rc 10). Terse mode + cut is robust even for
+  # names containing spaces.
+  shell: |
+    nmcli -t -f NAME,DEVICE connection show --active \
+      | grep ":{{ item }}$" | cut -d: -f1 | head -1
   loop: [ "{{ pub_iface }}", "{{ nat_iface | default('eth0') }}" ]
   register: nm_con_names
   changed_when: false
@@ -97,13 +103,21 @@
         ipv4.dns "{{ ([public_ip] + peer_ips) | join(',') }}"
         ipv4.dns-search "{{ domain_name }}"
         ipv4.ignore-auto-dns yes
+        ipv4.dns-priority 1
     - name: Disable DHCP DNS on the NAT connection (keep its default route)
       command: nmcli con mod "{{ nm_con_names.results[1].stdout }}" ipv4.ignore-auto-dns yes
       when: nm_con_names.results[1].stdout | default('') | length > 0
 
-- name: Apply connection changes (this node's ssh may blip once)
-  shell: nohup sh -c 'sleep 2; nmcli general reload 2>/dev/null || nmcli con up "{{ nm_con_names.results[0].stdout }}"' >/tmp/nm-reload.log 2>&1 &
-  args: { executable: /bin/bash }
+- name: Re-apply NAT profile (DNS flags take effect)
+  command: nmcli con up "{{ nm_con_names.results[1].stdout }}"
+  when:
+    - nm_con_names.results[1].stdout | default('') | length > 0
+  changed_when: true
+
+- name: "Re-apply host-only profile (async - flaps the ansible path ~2s)"
+  command: nmcli con up "{{ nm_con_names.results[0].stdout }}"
+  async: 30
+  poll: 0
   changed_when: true
 
 - name: Wait for the node to come back
@@ -327,13 +341,15 @@
 
     - name: Collect host keys for every cluster name/IP (this node's view)
       shell: >-
-        set -o pipefail;
         for h in {{ domain_name }} {{ groups['rac'] | map('regex_replace', '\.' ~ domain_name ~ '$', '') | join(' ') }} {{ short_name }}
         {% for n in groups['rac'] %}
         {{ hostvars[n].public_ip }} {{ hostvars[n].private_ip }} {{ hostvars[n].vip }}
         {% endfor %}
         {% for n in groups['rac'] %}{{ n }} {% endfor %}
-        {{ scan_name }}; do ssh-keyscan -T 5 "$h" 2>/dev/null; done | sort -u
+        {{ scan_name }}; do ssh-keyscan -T 5 "$h" 2>/dev/null || true; done | sort -u
+      # '|| true' PER HOP: EL9 OpenSSH keyscan exits 1 if ANY name lacks an
+      # sshd (SCAN/VIP/domain) — EL7's binary always returned 0, which is
+      # why db11g's pipefail never fired (di 2026-10-26).
       register: hostkeys_scan
       changed_when: false
 
