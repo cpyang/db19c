@@ -144,14 +144,16 @@
       PATH: "{{ oracle11_home }}/bin:/usr/bin:/bin"
       HOME: /home/oracle
   tasks:
-    - name: Check whether db11 is already registered
-      # physical-existence OR registration suppresses re-create: the
-      # register step (not this play) owns CRS, and a dbca -createDatabase
-      # over an existing +DATA/DB11 would abort the play.
+    - name: Check whether db11 already exists (registered or on disk)
+      # 11g dbca under GI19 silently rc0-exits from
+      # ASMUtils.validateASMInstance ('clusterware/siha home not found',
+      # 2026-10-27) when pointed at ASM -> storageType FS instead; guard
+      # on the CRS registration OR the on-disk control file.
       shell: |
-        {{ grid_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 \
-          || {{ grid_home }}/bin/asmcmd ls +{{ asm_diskgroup_data }}/{{ db11_name | upper }}/DATAFILE >/dev/null 2>&1
-      become_user: grid
+        export ORACLE_HOME={{ oracle11_home }}
+        {{ oracle11_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 \
+          || ls /u01/app/oracle/oradata/{{ db11_name | upper }}/control01.ctl >/dev/null 2>&1
+      become_user: oracle
       register: db11_registered
       failed_when: false
       changed_when: false
@@ -171,8 +173,8 @@
         -systemPassword {{ system_password }}
         -dbsnmpPassword {{ dbsnmp_password }}
         -emConfiguration NONE
-        -storageType ASM
-        -diskGroupName {{ asm_diskgroup_data }}
+        -storageType FS
+        -datafileDestination /u01/app/oracle/oradata
         -characterSet {{ db_charset }}
         -nationalCharacterSet {{ db_ncharset }}
         -memoryPercentage 20
@@ -187,16 +189,6 @@
         - dbca11.rc != 0
         - db11_registered.rc != 0     # tolerate 'already there' re-runs
 
-    - name: Locate the ASM spfile dbca left in +DATA
-      # spfile.264.1234567890 — the exact name is generated; discover it
-      # instead of baking a placeholder. (asmcmd 'find', pattern-limited.)
-      shell: |
-        export ORACLE_HOME={{ grid_home }}
-        {{ grid_home }}/bin/asmcmd ls {{ asm_diskgroup_data }}/{{ db11_name | upper }}/PARAMETERFILE/ 2>/dev/null | grep -i spfile | head -1
-      become_user: grid
-      register: sp11
-      changed_when: false
-      failed_when: false
 
     - name: Register db11 with GI 19c (if not registered yet)
       # MUST register from the 11g home's srvctl: GI-19c srvctl refuses to
@@ -207,12 +199,8 @@
       # add instance with the CRS SHORT nodename.
       shell: |
         {{ oracle11_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 && exit 0
-        SP=""
-        {% if sp11.stdout | trim %}
-        SP="-p +{{ asm_diskgroup_data }}/{{ db11_name | upper }}/PARAMETERFILE/{{ sp11.stdout | trim }}"
-        {% endif %}
         {{ oracle11_home }}/bin/srvctl add database -d {{ db11_name }} \
-          -o {{ oracle11_home }} $SP -a {{ asm_diskgroup_data }}
+          -o {{ oracle11_home }}
         {{ oracle11_home }}/bin/srvctl add instance -d {{ db11_name }} -i {{ db11_sid }} -n {{ hostvars[groups['rac'][0]].short_name }}
       become_user: oracle
       environment: "{{ db11_env }}"
@@ -227,11 +215,12 @@
       # any beyond node1 so the DB is genuinely single-instance.
       shell: |
         # srvctl status lines: "Instance <ins> is running on node <n>"
-        {{ grid_home }}/bin/srvctl status database -d {{ db11_name }} \
-          | awk '$NF != "{{ db11_node }}" {print $2}' \
+        export ORACLE_HOME={{ oracle11_home }}
+        {{ oracle11_home }}/bin/srvctl status database -d {{ db11_name }} \
+          | awk '$NF != "{{ hostvars[groups['rac'][0]].short_name }}" {print $2}' \
           | while read -r ins; do
-              {{ grid_home }}/bin/srvctl stop instance -d {{ db11_name }} -i $ins || true
-              {{ grid_home }}/bin/srvctl remove instance -d {{ db11_name }} -i $ins || true
+              {{ oracle11_home }}/bin/srvctl stop instance -d {{ db11_name }} -i $ins || true
+              {{ oracle11_home }}/bin/srvctl remove instance -d {{ db11_name }} -i $ins || true
             done
         true
       become_user: grid
@@ -240,9 +229,10 @@
 
     - name: Ensure db11 up
       shell: |
-        {{ grid_home }}/bin/srvctl start database -d {{ db11_name }} 2>&1 \
+        export ORACLE_HOME={{ oracle11_home }}
+        {{ oracle11_home }}/bin/srvctl start database -d {{ db11_name }} 2>&1 \
           | grep -v PRCC-1014 || true
-        {{ grid_home }}/bin/srvctl status database -d {{ db11_name }}
+        {{ oracle11_home }}/bin/srvctl status database -d {{ db11_name }}
       become_user: grid
       register: db11_status
       changed_when: true
