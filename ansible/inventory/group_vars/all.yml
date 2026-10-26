@@ -99,6 +99,7 @@ oracle_packages:
   # tooling used by bootstrap scripts / installers / CVU
   - bc
   - bind-utils
+  - cloud-utils-growpart   # growpart for the root-LV growth task
   - dnsmasq
   - nfs-utils
   - psmisc
