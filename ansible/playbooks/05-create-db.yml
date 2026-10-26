@@ -44,7 +44,8 @@
       command: >-
         {{ oracle_home }}/bin/dbca -silent -createDatabase
         -templateName {{ dbca_template }}
-        -adminManaged
+        -databaseConfigType RAC
+        -nodelist {{ hostvars[groups['rac'][0]].short_name }},{{ hostvars[groups['rac'][1]].short_name }}
         -gdbName {{ db_name }}
         -sid {{ db_sid_prefix }}1
         -sysPassword {{ sys_password }}
