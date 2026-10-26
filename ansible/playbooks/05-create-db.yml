@@ -44,8 +44,6 @@
       command: >-
         {{ oracle_home }}/bin/dbca -silent -createDatabase
         -templateName {{ dbca_template }}
-        -databaseConfigType RAC
-        -nodelist {{ groups['rac'] | map('split', '.') | map('first') | join(',') }}
         -gdbName {{ db_name }}
         -sid {{ db_sid_prefix }}1
         -sysPassword {{ sys_password }}
@@ -72,28 +70,35 @@
       changed_when: true
       when: db19_registered.rc != 0
 
-    - name: Add instance {{ db_sid_prefix }}2 on node2
-      # -nodeName must be the CRS SHORT nodename (tests-lab proven form);
-      # the FQDN that 11.2 grammar tolerated makes 19c dbca fail with the
-      # misleading DBT-10203 admin-managed-only error (05 run-3
-      # 2026-10-26; the DB was admin-managed all along). Comments live
-      # HERE, never inside shell blocks beginning with {{ }} - ansible
-      # shlex-parses those, and an apostrophe becomes an unbalanced quote.
+    - name: Extend db19c to two instances (srvctl path; dbca OPS-ssh is broken)
+      # Both dbca verbs (create -nodelist / -addInstance) die in INS-06006
+      # on EL9 even though every ssh probe returns rc=0 and the trace logs
+      # the node as 'reachable' (2026-10-26, ~10 runs). The documented
+      # SI-to-RAC conversion via srvctl avoids the OPS layer entirely:
+      # flip cluster_database in spfile, add the CRS instance, give the
+      # new SID sid-specific instance_number + undo, restart fleet-managed.
       shell: |
-        {{ grid_home }}/bin/srvctl status database -d {{ db_name }} \
-          | grep -q "{{ db_sid_prefix }}2" && echo ALREADY && exit 0
+        if {{ grid_home }}/bin/srvctl status database -d {{ db_name }} \
+             | grep -q "{{ db_sid_prefix }}2"; then echo ALREADY; exit 0; fi
         export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
-        export CV_ASSUME_DISTID=OEL7.8 ORA_DISABLED_CVU_CHECKS=SCAN
         export ORACLE_SID={{ db_sid_prefix }}1
-        {{ oracle_home }}/bin/dbca -silent -addInstance \
-          -gdbName {{ db_name }} \
-          -nodeName {{ hostvars[groups['rac'][1]].short_name }} \
-          -instanceName {{ db_sid_prefix }}2 \
-          -sysDBAUserName sys -sysDBAPassword {{ sys_password }}
+        sqlplus -s / as sysdba <<SQL
+        alter system set cluster_database=true scope=spfile sid='*';
+        create undo tablespace UNDOTBS2 datafile '+DATA' size 512M autoextend on maxsize 8G;
+        exit
+        SQL
+        {{ grid_home }}/bin/srvctl add instance -db {{ db_name }} -i {{ db_sid_prefix }}2 -n {{ hostvars[groups['rac'][1]].short_name }}
+        sqlplus -s / as sysdba <<SQL
+        alter system set instance_number=2 scope=spfile sid='{{ db_sid_prefix }}2';
+        alter system set undo_tablespace='UNDOTBS2' scope=spfile sid='{{ db_sid_prefix }}2';
+        exit
+        SQL
+        {{ grid_home }}/bin/srvctl stop database -d {{ db_name }} -f
+        {{ grid_home }}/bin/srvctl start database -d {{ db_name }}
       become_user: oracle
-      register: dbca19_add
+      register: extend_out
       timeout: 3600
-      changed_when: "'ALREADY' not in dbca19_add.stdout"
+      changed_when: "'ALREADY' not in extend_out.stdout"
 
     - name: Start db19c, both instances
       shell: |
