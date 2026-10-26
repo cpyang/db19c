@@ -82,6 +82,10 @@ oracle_packages:
   - librdmacm
   - libstdc++
   - libstdc++-devel
+  # EL9 native is libcrypt.so.2; the perl BUNDLED in 19c homes (gridSetup
+  # startup!) and 11g homes links the old libcrypt.so.1 -> rc 127 in
+  # 0 seconds. gridSetup run-3, node1 2026-10-26.
+  - libxcrypt-compat
   - libX11
   - libXau
   - libXi
