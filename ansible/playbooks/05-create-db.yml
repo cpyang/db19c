@@ -51,7 +51,7 @@
         -emConfiguration NONE
         -storageType ASM
         -diskGroupName {{ asm_diskgroup_data }}
-        -recoveryGroupName {{ asm_diskgroup_fra }}
+        -recoveryAreaDestination +{{ asm_diskgroup_fra }}
         -recoveryAreaSize 9216
         -characterSet {{ db_charset }}
         -nationalCharacterSet {{ db_ncharset }}
