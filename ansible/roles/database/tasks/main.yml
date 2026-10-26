@@ -147,8 +147,10 @@
     # -lclntshcore' (rac2 run-6; rac1 only passed on stale residue).
     # Build the core client libs first when absent (idempotent).
     test -e {{ oracle_home }}/lib/libclntshcore.so || \
-      (cd {{ oracle_home }}/rdbms/lib && make -f ins_rdbms.mk client_sharedlib)
+      (cd {{ oracle_home }}/rdbms/lib && ORACLE_HOME={{ oracle_home }} make -f ins_rdbms.mk client_sharedlib)
   become_user: oracle
+  environment:
+    ORACLE_HOME: "{{ oracle_home }}"
   when:
     - db_phase == 'software'
     - db_link_state
