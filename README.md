@@ -176,13 +176,18 @@ node1 before node2 — do not remove the play ordering.
   ordered sequence — a hand-trimmed rsp dies INS-10105; spike-verified)
 
 ### Databases (`05`)
-- `db19c`: dbca create CDB+PDB on node1, `-addInstance` node2 (the tests
-  grammar), `ORA_DISABLED_CVU_CHECKS=SCAN` (phantom check, DNS verified
-  manually in 01); assert 2 running instances via srvctl status
-- `db11`: dbca from the 11g home with `-initParams cluster_database=false`
-  (flag confirmed in this home's `dbca -help`), then `srvctl add database
-  -r SINGLE` from the 19c GI (spfile path discovered via `asmcmd ls`,
-  never a placeholder); instances beyond node1 removed
+- `db19c`: dbca creates the CDB in its plain **single-instance** shape,
+  then RAC is added by CRS-local srvctl registration — `remove database`
+  / `add database -p <asm spfile>` / `add instance` per node /
+  `instance_number`+UNDO stamped in the spfile via a nomount overlay.
+  (dbca's own cluster verbs die in INS-06006 on EL9 although ssh probes
+  return rc0; see the skill ref srvctl-manual-rac-registration.md.)
+  PDBs opened + save state at the end of play 1.
+- `db11`: 11.2 dbca with `-storageType FS` (under GI 19 the 11g dbca
+  silently exits rc0 having created nothing when pointed at ASM) and
+  `-initParams cluster_database=false`; register/stop/start **from the
+  11g home's srvctl** (GI-19 srvctl refuses 11.2-versioned resources,
+  PRCD-1229/1298) with `-p $OH/dbs/spfiledb11.ora` explicit
 
 ## Verify
 
@@ -191,7 +196,7 @@ vagrant ssh db19c-rac1
 sudo -u grid /u01/app/19.0.0/grid/bin/crsctl check cluster -all
 sudo -u grid asmcmd lsdg                       # CRS DATA FRA mounted
 sudo -u grid srvctl status database -d db19c   # db191 + db192 RUNNING
-sudo -u grid srvctl status database -d db11    # db111 on node1
+sudo su - oracle -c "export ORACLE_HOME=/u01/app/oracle/product/11.2.0/dbhome_1; srvctl status database -d db11"  # db11 on rac1
 # 19c:  . /home/oracle/.bash_profile;    sqlplus sys/oracle@db19c-scan:1521/pdb0.db19c.lab
 # 11g:  . /home/oracle/db11g.env;        sqlplus sys/oracle@db19c-scan:1521/db11.db19c.lab
 ```
