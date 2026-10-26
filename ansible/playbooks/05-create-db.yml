@@ -215,6 +215,7 @@
           -o {{ oracle11_home }} $SP -a {{ asm_diskgroup_data }}
         {{ oracle11_home }}/bin/srvctl add instance -d {{ db11_name }} -i {{ db11_sid }} -n {{ hostvars[groups['rac'][0]].short_name }}
       become_user: oracle
+      environment: "{{ db11_env }}"
       register: db11_add
       changed_when: db11_add.rc == 0
 
