@@ -44,6 +44,7 @@
       command: >-
         {{ oracle_home }}/bin/dbca -silent -createDatabase
         -templateName {{ dbca_template }}
+        -adminManaged
         -gdbName {{ db_name }}
         -sid {{ db_sid_prefix }}1
         -sysPassword {{ sys_password }}
