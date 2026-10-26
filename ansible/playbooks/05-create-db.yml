@@ -194,6 +194,10 @@
       failed_when: false
 
     - name: Register db11 with GI 19c (if not registered yet)
+      # 19c srvctl grammar: no -r (type inferred from instance count); NO
+      # -i/-n on add database (single-dash prefixes collide with -dbname ->
+      # PRKO-2003/PRKF-1125, 2026-10-27). The lone instance comes from
+      # add instance, node must be the CRS SHORT nodename.
       shell: |
         {{ grid_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 && exit 0
         SP=""
@@ -201,8 +205,8 @@
         SP="-p +{{ asm_diskgroup_data }}/{{ db11_name | upper }}/PARAMETERFILE/{{ sp11.stdout | trim }}"
         {% endif %}
         {{ grid_home }}/bin/srvctl add database -d {{ db11_name }} \
-          -o {{ oracle11_home }} -i {{ db11_sid }} -n {{ db11_name }} \
-          -r SINGLE -a {{ asm_diskgroup_data }} $SP
+          -o {{ oracle11_home }} $SP -a {{ asm_diskgroup_data }}
+        {{ grid_home }}/bin/srvctl add instance -db {{ db11_name }} -i {{ db11_sid }} -n {{ hostvars[groups['rac'][0]].short_name }}
       become_user: grid
       register: db11_add
       changed_when: db11_add.rc == 0
