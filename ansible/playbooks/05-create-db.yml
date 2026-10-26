@@ -163,6 +163,13 @@
     # binaries that no longer own the stack here — cluster_database=false
     # in -initParams keeps dbca creating a plain single-instance DB.
     # Cluster registration then happens once, explicitly, from 19c srvctl.
+    - name: Purge stale db11 oratab entry
+      # dbca refuses an existing SID; the phantom 11g dbca runs (ASM mode,
+      # silent rc0) each left an oratab line without a database (2026-10-27,
+      # 'SID db11 already exists').
+      shell: sed -i '/^{{ db11_sid }}:/d' /etc/oratab
+      when: db11_registered.rc != 0
+
     - name: dbca create db11 from the 11g home (30-60 min)
       command: >-
         {{ oracle11_home }}/bin/dbca -silent -createDatabase
