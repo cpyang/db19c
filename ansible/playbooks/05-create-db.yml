@@ -40,38 +40,6 @@
       failed_when: false
       changed_when: false
 
-    - name: Is the registered db19c serverpool-managed?
-      command: "{{ grid_home }}/bin/srvctl config database -d {{ db_name }}"
-      become_user: grid
-      changed_when: false
-      register: srvpool_probe
-      failed_when: false
-      when: db19_registered.rc == 0
-
-    - name: Drop pool-managed leftover from early 05 runs
-      # 19c dbca silently chose SERVERPOOL management when this lab's
-      # port omitted -databaseConfigType (11.2 defaults differed);
-      # addInstance then dies DBT-10203 ('admin managed only'). Guarded
-      # on the Server-pool line so a healthy admin-managed rerun NEVER
-      # drops. Create below now forces RAC + adminManaged.
-      command: >-
-        {{ oracle_home }}/bin/dbca -silent -deleteDatabase -sourceDB {{ db_name }}
-        -sysDBAUserName sys -sysDBAPassword {{ sys_password }}
-      become_user: oracle
-      environment: "{{ db_home_env }}"
-      register: dropper
-      when:
-        - db19_registered.rc == 0
-        - '"Server pool" in srvpool_probe.stdout | default("")'
-      timeout: 3600
-
-    - name: Re-check registration after possible drop
-      command: "{{ grid_home }}/bin/srvctl config database -d {{ db_name }}"
-      become_user: grid
-      register: db19_registered
-      failed_when: false
-      changed_when: false
-
     - name: dbca create the CDB on node1 (30-60 min)
       command: >-
         {{ oracle_home }}/bin/dbca -silent -createDatabase
@@ -113,7 +81,11 @@
         export ORACLE_SID={{ db_sid_prefix }}1
         {{ oracle_home }}/bin/dbca -silent -addInstance \
           -gdbName {{ db_name }} \
-          -nodeName {{ groups['rac'][1] }} \
+          # CRS nodename = SHORT name (tests-lab proven form). The FQDN
+          # db11g's 11.2 grammar tolerated makes 19c dbca fail with the
+          # misleading DBT-10203 'admin managed only' (05 run-3,
+          # 2026-10-26: DB was admin-managed all along).
+          -nodeName {{ hostvars[groups['rac'][1]].short_name }} \
           -instanceName {{ db_sid_prefix }}2 \
           -sysDBAUserName sys -sysDBAPassword {{ sys_password }}
       become_user: oracle
