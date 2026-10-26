@@ -45,7 +45,7 @@
         {{ oracle_home }}/bin/dbca -silent -createDatabase
         -templateName {{ dbca_template }}
         -databaseConfigType RAC
-        -nodelist {{ groups['rac'] | join(",") }}
+        -nodelist {{ groups['rac'] | map('split', '.') | map('first') | join(',') }}
         -gdbName {{ db_name }}
         -sid {{ db_sid_prefix }}1
         -sysPassword {{ sys_password }}
