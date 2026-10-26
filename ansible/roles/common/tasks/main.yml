@@ -423,3 +423,34 @@
     line: 'PATH="{{ grid_home }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
     create: yes
     mode: "0644"
+
+# ------------------------------------------- EL9 link prerequisite (19c too!)
+- name: Create libpthread_nonshared.a link stub
+  # EL9 glibc>=2.34 deleted it; BOTH the 19c client_sharedlib link (04
+  # run-2 rac2: 'ld: cannot find /usr/lib64/libpthread_nonshared.a') and
+  # 11g genclntsh name it explicitly. Empty-but-valid archive suffices.
+  shell: |
+    printf 'int __oracle_compat_stub(void){return 0;}\n' > /tmp/pstub.c
+    cc -c /tmp/pstub.c -o /tmp/pstub.o
+    ar rcs /usr/lib64/libpthread_nonshared.a /tmp/pstub.o
+  args:
+    creates: /usr/lib64/libpthread_nonshared.a
+
+# ------------------------------------------------ root disk into 60G primary
+- name: Grow root FS into unpartitioned tail of the 60G primary disk
+  # Box ships a 32G LV on a larger disk when Vagrantfile sets primary
+  # 60GB (db11g's 32G sufficed for 11g; GI+RU+2 homes overflow it — rac1
+  # hit 100% at RU staging, 04 run-2 2026-10-26). Fully idempotent:
+  # growpart rc2=already-max, pvresize/lvextend/xfs_growfs no-op on rerun.
+  shell: |
+    set -e
+    pv=$(pvs --noheadings -o pv_name | tr -d ' ' | head -1)
+    dev=$(basename "$(lsblk -no pkname "$pv")")
+    num=${pv##*[a-z]}
+    growpart /dev/$dev $num || [ $? -eq 2 ] || exit 1
+    pvresize "$pv" >/dev/null
+    lvextend -l +100%FREE /dev/mapper/vg_main-lv_root 2>/dev/null || true
+    xfs_growfs / >/dev/null
+    df -B1 / | awk 'NR==2{printf "%.0fG", $2/1073741824}'
+  register: grow_out
+  changed_when: '"G" in grow_out.stdout and grow_out.stdout != "32G"'

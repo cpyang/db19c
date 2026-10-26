@@ -254,3 +254,9 @@
   debug:
     msg: "{{ verify_out.stdout_lines | default([]) }}"
   when: grid_phase == 'dgs'
+
+- name: Free RU staging after verified cluster (rac1 hit disk-full at DB RU unzip — 04 run-2 2026-10-26; root.sh/ConfigNode copies are long done by here)
+  file:
+    path: "{{ ru_stage_dir }}/gi"
+    state: absent
+  when: grid_phase == 'dgs'
