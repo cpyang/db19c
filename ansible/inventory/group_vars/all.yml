@@ -2,8 +2,9 @@
 # GI 19c + DB 19c + DB 11.2.0.4 — global variables (Oracle Linux 9)
 # ============================================================
 
-# --- Installation media (repo staging/ symlinks -> host ~/staging, mounted
-# read-only at /u01/staging; VBox shared folders follow the symlinks) ---
+# --- Installation media (host library ~/staging/{db19c,db11g} on the lab
+# host, mounted read-only at /u01/media/db19c + /u01/media/db11g via DIRECT
+# VBox shares — repo-staging SYMLINKS do not resolve on EL9 guests) ---
 # Media identity VERIFIED against di's library (2026-10-26):
 #   LINUX.X64_193000_grid_home.zip / _db_home.zip  = 19.3 BASE (unzip into OH)
 #   p39036936 = GI  RU 19.31.0.0.0 (gridSetup -applyRU)
@@ -11,7 +12,8 @@
 #   p6880880  = OPatch (REPLACE the home's bundled one before any opatch call)
 #   p13390677_1of7+2of7 = 11.2.0.4 RDBMS software (3of7 = GI — NOT installed;
 #   GI here is 19c)
-oracle_stage_dir: /u01/staging
+oracle_stage_dir: /u01/media/db19c
+stage11_dir: /u01/media/db11g
 oracle_media_dir: /u01/media
 gi_base_zip: "LINUX.X64_193000_grid_home.zip"
 db_base_zip: "LINUX.X64_193000_db_home.zip"

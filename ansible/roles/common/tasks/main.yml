@@ -228,8 +228,8 @@
     - { path: /u01/app/19.0.0, owner: grid }
     - { path: /u01/app/oracle/product/19.0.0, owner: oracle }
     - { path: /u01/app/oracle/product/11.2.0, owner: oracle }
-    # /u01/staging is NOT managed here: it is the vboxsf mountpoint Vagrant
-    # creates at boot — any setattr on it fails (ro mount).
+    # /u01/media/{db19c,db11g} are NOT managed here: Vagrant creates
+    # those vboxsf mountpoints at boot — setattr fails (ro mount).
     - { path: /u01/media, owner: oracle }
     - { path: /u01/patches, owner: grid }
     - { path: "{{ grid_install_tmp }}", mode: '1777' }   # installer scratch off /tmp

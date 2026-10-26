@@ -20,7 +20,7 @@
 # ------------------------------------------------------------------ check
 - name: Confirm 11g media is visible on the staging mount
   stat:
-    path: "{{ oracle_stage_dir }}/{{ item }}"
+    path: "{{ stage11_dir }}/{{ item }}"
   loop: "{{ oracle11_database_zips }}"
   register: db11_media
   failed_when: not db11_media.stat.exists
@@ -44,7 +44,7 @@
 
 - name: Unarchive 11g media (two parts overlay into database/)
   unarchive:
-    src: "{{ oracle_stage_dir }}/{{ item }}"
+    src: "{{ stage11_dir }}/{{ item }}"
     dest: "{{ oracle_media_dir }}"
     remote_src: true
     owner: oracle

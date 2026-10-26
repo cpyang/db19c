@@ -187,10 +187,14 @@ Vagrant.configure('2') do |config|
   # The repo folder must NOT rsync GB-scale zips/VDIs into every guest.
   config.vm.synced_folder '.', '/vagrant', disabled: true
 
-  # Installation media: read-only VirtualBox shared folder (no copying).
-  # staging/ holds per-file SYMLINKS to the host media library — VBox
-  # shared-folder mounts follow them; nothing is duplicated in the repo.
-  config.vm.synced_folder 'staging', '/u01/staging',
+  # Installation media: DIRECT read-only VBox shares of the host media
+  # library (~/staging/{db19c,db11g} on the lab host). The previous
+  # repo-staging-symlink model worked on EL7 guests, but EL9 vboxsf
+  # resolves absolute symlink targets INSIDE the guest -> ENOENT while a
+  # bare stat of the link still passes — a silent trap (di 2026-10-26).
+  config.vm.synced_folder File.expand_path('~/staging/db19c'), '/u01/media/db19c',
+    type: 'virtualbox', mount_options: %w[ro fmode=644 dmode=755 uid=0 gid=0]
+  config.vm.synced_folder File.expand_path('~/staging/db11g'), '/u01/media/db11g',
     type: 'virtualbox', mount_options: %w[ro fmode=644 dmode=755 uid=0 gid=0]
 
   NODES.each do |node_name, node|
