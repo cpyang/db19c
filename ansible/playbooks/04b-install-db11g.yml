@@ -1,0 +1,45 @@
+# ============================================================
+# Playbook 04b — RDBMS 11.2.0.4 software on OL9 (home 2)
+# Local per-node install + the ol9_11g_fixup recipe (Phase-0 spike
+# proven: stub libpthread_nonshared.a pre, genclntsh/config.o/ioracle
+# post). The 11g database itself arrives in playbook 05, registered
+# with GI 19c through srvctl.
+# Run: ansible-playbook playbooks/04b-install-db11g.yml
+# ============================================================
+
+- name: 11g preflight (media)
+  hosts: rac
+  gather_facts: false
+  become: true
+  vars:
+    db11_stage: check
+  roles:
+    - database11g
+
+- name: "11g DB software (per node: fixups pre, runInstaller, relink post)"
+  hosts: rac
+  gather_facts: false
+  become: true
+  vars:
+    db11_stage: software
+  roles:
+    - database11g
+
+- name: 11g root.sh (setuid; node1 then node2 for tidy logs)
+  hosts: rac
+  gather_facts: false
+  become: true
+  serial: 1
+  vars:
+    db11_stage: root
+  roles:
+    - database11g
+
+- name: 11g home verify (binary runs, sqlplus runs)
+  hosts: rac
+  gather_facts: false
+  become: true
+  vars:
+    db11_stage: verify
+  roles:
+    - database11g

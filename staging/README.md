@@ -1,46 +1,38 @@
 # Installer media staging
 
-Everything in this directory is gitignored **except this README** — the
-Oracle binaries are licensed and must be downloaded by you.
+Everything here is gitignored **except this README** — Oracle binaries are
+licensed; you place them once, the repo only stores symlinks.
 
-## What goes here
+## What this lab needs (and where di already has it)
 
-Oracle Database 11.2.0.4 for Linux x86-64 — My Oracle Support
-**Patch 13390677** (search "11.2.0.4 for Linux x86-64"), all seven parts:
+| File | Role | di location |
+|------|------|-------------|
+| `LINUX.X64_193000_grid_home.zip` | GI 19.3 base (unzip INTO the GI home) | `~/staging/db19c/` |
+| `LINUX.X64_193000_db_home.zip` | RDBMS 19.3 base | `~/staging/db19c/` |
+| `p39036936_190000_Linux-x86-64.zip` | **GI RU 19.31** (`gridSetup -applyRU`) | `~/staging/db19c/` |
+| `p39034528_190000_Linux-x86-64.zip` | **DB RU 19.31** (`runInstaller -applyRU`) | `~/staging/db19c/` |
+| `p6880880_190000_Linux-x86-64.zip` | OPatch (MUST replace the bundled one) | `~/staging/db19c/` |
+| `p13390677_112040_Linux-x86-64_1of7.zip` | 11.2.0.4 RDBMS part 1 | `~/staging/db11g/` |
+| `p13390677_112040_Linux-x86-64_2of7.zip` | 11.2.0.4 RDBMS part 2 | `~/staging/db11g/` |
 
-```
-p13390677_112040_Linux-x86-64_1of7.zip
-p13390677_112040_Linux-x86-64_2of7.zip
-...
-p13390677_112040_Linux-x86-64_7of7.zip
-```
+> 11g `3of7` is Grid Infrastructure — NOT used here: GI in this lab is 19c.
+> GI/DB RU 19.31 (Apr 2026) is deliberate: **19c on OL9 requires RU ≥ 19.19**,
+> and OL9U8 ships the UEKR7 kernel that combo needs.
 
-(`1of7` carries Grid Infrastructure, `2of7` the RDBMS install image;
-the playbooks unzip what they need from this directory.)
-
-## How to place them
-
-Either copy the zips in, or — to avoid duplicating ~7 GB — symlink each
-file from wherever your media library lives:
+## How to place them (on the VM host — di)
 
 ```bash
-ln -s /path/to/media/p13390677_112040_Linux-x86-64_*of7.zip staging/
+cd ~/src/db19c
+mkdir -p staging
+ln -sf ~/staging/db19c/LINUX.X64_193000_grid_home.zip \
+       ~/staging/db19c/LINUX.X64_193000_db_home.zip \
+       ~/staging/db19c/p39036936_190000_Linux-x86-64.zip \
+       ~/staging/db19c/p39034528_190000_Linux-x86-64.zip \
+       ~/staging/db19c/p6880880_190000_Linux-x86-64.zip staging/
+ln -sf ~/staging/db11g/p13390677_112040_Linux-x86-64_1of7.zip \
+       ~/staging/db11g/p13390677_112040_Linux-x86-64_2of7.zip staging/
 ```
 
 Keep `staging/` itself a real directory; only the files inside may be
-symlinks. (The VMs mount it via vboxsf, which resolves per-file host
-symlinks — verified working; a top-level `staging` symlink instead of a
-directory is NOT portable and was removed from the repo history.)
-
-## Sanity checks
-
-- `for z in staging/p13390677_*.zip; do unzip -t "$z" >/dev/null && echo OK "$z"; done`
-  — CRC failures mean a truncated download; the installer WILL die on it.
-- After `vagrant up`, the guest sees them read-only at `/u01/staging/`
-  (Vagrantfile shared-folder definition; playbooks 03/04 unpack from
-  there into `/u01/media`).
-
-## Git behavior
-
-`.gitignore` excludes any content placed here, tracks only this README,
-and also stays quiet if `staging` is (mistakenly) a symlink.
+symlinks — the VBox shared-folder mount follows them (db11g-proven), so
+nothing is ever copied into the repo or into guests.

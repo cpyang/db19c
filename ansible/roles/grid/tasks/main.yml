@@ -1,36 +1,43 @@
 # ============================================================
-# Role: grid — Oracle Grid Infrastructure 11.2.0.4 (media: 3of7!)
+# Role: grid — Oracle Grid Infrastructure 19c (19.3 base + RU 19.31)
 #
-# Install model (11.2.0.4): runInstaller runs on node1 ONLY and
-# PROPAGATES the home to the other cluster nodes over the grid user's
-# ssh trust — unlike the 19c lab's per-node path. That makes this role's
-# phases strictly ordered:
-#   stage=check     all nodes: media + ASM symlinks present
-#   stage=software  node1: unzip media, generate rsp, runInstaller
-#   stage=root      per node in order: root.sh (node1 starts CRS, node2
-#                   joins — NEVER both at once)
-#   stage=dgs       node1: asmca creates DATA + FRA (CRS dg came from the
-#                   installer — OCR/voting live in it)
+# Install model (19c, proven in oracle_dr_on_aws/tests on OL8):
+#   unzip grid_home.zip INTO the GI home (19c is install-in-place),
+#   replace the bundled (19.3) OPatch — -applyRU fails with it —
+#   then ONE gridSetup.sh -silent -applyRU on node1, which stages
+#   the home to the peer over the grid ssh trust and configures the
+#   cluster; root.sh node1 -> node2; asmca creates DATA + FRA.
+#
+#   stage=check     all nodes: media + ASM symlinks + NIC roles
+#   stage=software  node1: extract, OPatch, RU unzip, gridSetup
+#   stage=root      per node in order: orainstRoot.sh + root.sh
+#   stage=dgs       node1: asmca DATA + FRA, cluster verify
+#
+# Exit-code law (tests 2026-10-15): gridSetup rc 254 = "Exit Status -2"
+# = SILENT CONFIG ABORT. Only 0/6 are success. Never grep rc alone —
+# confirm SEVERE-free in GridSetupActions log.
 # ============================================================
 
 - name: Resolve stage from play vars
-  # NOTE the name split: the role never set_fact's grid_stage itself —
-  # a set_fact OUTLANKS play vars in precedence, so rewriting it in play 1
-  # pinned every later play to 'check' and 03/04 became no-op successes
-  # (di chain 2026-10-21 20:36). Read grid_stage, resolve into grid_phase.
+  # Never overwrite grid_stage itself — set_fact OUTRANKS play vars and
+  # pinned every later play to 'check' (db11g di 2026-10-21 20:36).
   set_fact:
     grid_phase: "{{ grid_stage | default('check') }}"
 
 # ------------------------------------------------------------------ check
-- name: Resolve NIC roles (needed by the rsp even on standalone runs)
+- name: Resolve NIC roles (the rsp needs interface NAMES, tests §1e)
   include_role:
     name: common
     tasks_from: resolve-interfaces
   when: grid_phase == 'check'
 
-- name: Confirm media is mounted read-only at {{ oracle_stage_dir }}
+- name: Confirm GI media is visible on the staging mount
   stat:
-    path: "{{ oracle_stage_dir }}/{{ oracle_grid_zip }}"
+    path: "{{ oracle_stage_dir }}/{{ item }}"
+  loop:
+    - "{{ gi_base_zip }}"
+    - "{{ gi_ru_zip }}"
+    - "{{ opatch_zip }}"
   register: grid_media
   failed_when: not grid_media.stat.exists
   when: grid_phase == 'check'
@@ -39,29 +46,78 @@
   stat:
     path: "/dev/oracleasm/disks/{{ item }}"
   loop: [CRS, DATA, FRA]
+  failed_when: not (item.stat.exists)
   register: asm_links
-  failed_when: not asm_links.stat.exists
   when: grid_phase == 'check'
 
 # ------------------------------------------------------------------ software
-- name: Detect existing GI home
-  stat:
-    path: "{{ grid_home }}/bin/crsctl"
-  register: crsctl_bin
+- name: Create GI home dir (mode 775, grid-owned)
+  file:
+    path: "{{ grid_home }}"
+    state: directory
+    owner: grid
+    group: "{{ oracle_installer_group }}"
+    mode: '0775'
   when: grid_phase == 'software'
 
-- name: Unarchive Grid Infrastructure media (node1; installer propagates)
+- name: Detect extracted GI software (gridSetup.sh sits at the HOME TOP in 19c)
+  stat:
+    path: "{{ grid_home }}/gridSetup.sh"
+  register: gi_bin
+  when: grid_phase == 'software'
+
+- name: Extract GI base release INTO the home (node1 only)
   unarchive:
-    src: "{{ oracle_stage_dir }}/{{ oracle_grid_zip }}"
-    dest: "{{ oracle_media_dir }}"
+    src: "{{ oracle_stage_dir }}/{{ gi_base_zip }}"
+    dest: "{{ grid_home }}"
     remote_src: true
     owner: grid
     group: "{{ oracle_installer_group }}"
   become_user: grid
   when:
     - grid_phase == 'software'
-    - not crsctl_bin.stat.exists
+    - not gi_bin.stat.exists
     - inventory_hostname == groups['rac'][0]
+
+- name: Replace bundled OPatch in the GI home (node1; NO existence guard)
+  # The 19.3 base ships an OPatch too old for the 19.31 RU — 'opatch exists'
+  # != 'OPatch current'; a skipped replace kills -applyRU (tests 2026-10-15).
+  shell: |
+    rm -rf {{ grid_home }}/OPatch
+    unzip -q {{ oracle_stage_dir }}/{{ opatch_zip }} -d {{ grid_home }}
+  become_user: grid
+  when:
+    - grid_phase == 'software'
+    - inventory_hostname == groups['rac'][0]
+
+- name: Stage RU directories
+  file:
+    path: "{{ ru_stage_dir }}/{{ item }}"
+    state: directory
+    owner: grid
+    group: "{{ oracle_installer_group }}"
+  loop: [gi, db]
+  when: grid_phase == 'software'
+
+- name: Extract GI RU (node1)
+  unarchive:
+    src: "{{ oracle_stage_dir }}/{{ gi_ru_zip }}"
+    dest: "{{ ru_stage_dir }}/gi"
+    remote_src: true
+    owner: grid
+    group: "{{ oracle_installer_group }}"
+  become_user: grid
+  when:
+    - grid_phase == 'software'
+    - inventory_hostname == groups['rac'][0]
+
+- name: Detect whether the cluster is already CONFIGURED
+  # /etc/oracle/olr.loc appears during gridSetup's config phase — the
+  # guard that keeps a re-run from re-invoking a -applyRU session (~1 h).
+  stat:
+    path: /etc/oracle/olr.loc
+  register: olr_loc
+  when: grid_phase == 'software'
 
 - name: Render grid_install.rsp
   template:
@@ -69,342 +125,121 @@
     dest: "{{ grid_install_tmp }}/grid_install.rsp"
     owner: grid
     group: "{{ oracle_installer_group }}"
-    mode: '0600'      # contains ASM monitor/sys passwords
-  when: grid_phase == 'software'
-
-# 11.2.0.4 runInstaller returns 0 on success; non-zero here is a real abort.
-# -ignorePrereq accepts CVU WARNINGS — do not use this run to paper over
-# FAILURES; check the log below if it dies.
-- name: Install GI software + configure cluster (node1 only, long-running)
-  command: >-
-    {{ oracle_media_dir }}/grid/runInstaller -silent
-    -responseFile {{ grid_install_tmp }}/grid_install.rsp
-    -ignorePrereq
-    -waitforcompletion
-  become_user: grid
-  environment:
-    ORACLE_HOSTNAME: "{{ inventory_hostname }}"
-    TMPDIR: "{{ grid_install_tmp }}"
-    LANG: en_US.UTF-8
-  register: gi_install
-  failed_when: gi_install.rc != 0
-  timeout: 5400
-  changed_when: true
+    mode: '0600'      # contains SYSASM/monitor passwords
+  vars:
+    pub_iface: "{{ hostvars[inventory_hostname].pub_iface | default(omit) }}"
+    priv_iface: "{{ hostvars[inventory_hostname].priv_iface | default(omit) }}"
   when:
     - grid_phase == 'software'
-    - not crsctl_bin.stat.exists
     - inventory_hostname == groups['rac'][0]
 
-- name: Show installer tail (empty list if the task was skipped)
-  debug:
-    msg: "{{ (gi_install.stderr_lines | default([]))[-10:] }}"
-  when: grid_phase == 'software'
+- name: Resolve NIC roles for the rsp (standalone stage runs)
+  include_role:
+    name: common
+    tasks_from: resolve-interfaces
+  when:
+    - grid_phase == 'software'
+    - hostvars[inventory_hostname].pub_iface is not defined
+
+- name: gridSetup -silent -applyRU (node1; stages peers; 45-90 min)
+  command: >-
+    {{ grid_home }}/gridSetup.sh -silent
+    -applyRU {{ ru_stage_dir }}/gi/{{ gi_ru_id }}
+    -responseFile {{ grid_install_tmp }}/grid_install.rsp
+    -ignorePrereqFailure
+  become_user: grid
+  environment:
+    TMPDIR: "{{ grid_install_tmp }}"
+    LANG: en_US.UTF-8
+  register: gi_setup
+  failed_when: gi_setup.rc not in [0, 6]     # 254 = silent config abort
+  timeout: 9000
+  when:
+    - grid_phase == 'software'
+    - not olr_loc.stat.exists
+    - inventory_hostname == groups['rac'][0]
+
+- name: Confirm gridSetup configured without SEVERE (log is ground truth)
+  shell: |
+    L=$(ls -t {{ hostvars[groups['rac'][0]].ora_inventory | default(ora_inventory) }}/logs/GridSetupActions*/gridSetupActions*.log 2>/dev/null | head -1)
+    [ -n "$L" ] || { echo "no gridSetupActions log"; exit 1; }
+    grep -E "SEVERE" "$L" | head -5
+    ! grep -qE "SEVERE" "$L"
+  run_once: true
+  delegate_to: "{{ groups['rac'][0] }}"
+  become_user: grid
+  changed_when: false
+  when:
+    - grid_phase == 'software'
+    - gi_setup.rc is defined and gi_setup.rc in [0, 6]
 
 # ------------------------------------------------------------------ root.sh
-# EL7 + 11.2.0.4 classic (hit live on di 2026-10-21 twice): root.sh formats
-# OCR, registers ohasd in /etc/inittab — which systemd NEVER executes —
-# then WAITS ~30 min and dies "Failed to start the Clusterware".
-# Pre-starting ohasd is also wrong: root.sh's own 'ohasd reboot' spawn then
-# fights the pre-started instance (double ohasd.bin = corrupt HAS state).
-# Correct dance: run root.sh ASYNC, wait until it has formatted OCR/OLR and
-# entered its wait loop, then start the stack PROPERLY (crsctl start crs)
-# over the cleaned processes — root.sh's wait sees a live stack and
-# completes. The systemd unit exists ONLY for post-reboot survival
-# (installed+enabled, never started by this play).
-- name: ohasd boot unit (install + enable only — never start here)
-  copy:
-    dest: /etc/systemd/system/ohasd.service
-    mode: '0644'
-    content: |
-      [Unit]
-      Description=Oracle HA stack boot bring-up (EL7 inittab workaround)
-      After=syslog.target network.target
-      [Service]
-      Type=oneshot
-      RemainAfterExit=yes
-      KillMode=none
-      ExecStart=/bin/sh -c 'af=/etc/oracle/scls_scr/$(hostname | cut -d. -f1)/root/ohasdrun; echo restart > $af; setsid /bin/sh -c "echo \$\$ > /var/run/init.ohasd.supervisor.pid; exec /etc/rc.d/init.d/init.ohasd run" >>/var/log/init.ohasd.supervisor 2>&1 &'
-      # Supervisor-loop form (see Start-HAS task for the pipe-pairing
-      # postmortem). KillMode=none so systemd never reaps the detached
-      # loop + daemon children (di 18:24).
-      [Install]
-      WantedBy=multi-user.target
-  when: grid_phase == 'root'
-
-- name: Enable boot unit (no state change on the running system)
-  systemd:
-    name: ohasd
-    daemon_reload: true
-    enabled: true
-  when: grid_phase == 'root'
-
-- name: Check whether CRS is already up on this node
-  # DECEPTIVE: 'crsctl check crs' can exit rc 0 while printing 'PRCO-2:
-  # Unable to communicate with the clusterware' on a dead stack (di
-  # 2026-10-22 17:31 — both nodes skipped root.sh with the cluster down).
-  # Never trust rc here; the stdout search is the guard.
-  command: "timeout 30 {{ grid_home }}/bin/crsctl check crs"
+- name: Check CRS state on this node
+  # NEVER trust rc: 'crsctl check crs' exited 0 while printing PRCO-2 on a
+  # dead stack (db11g di 2026-10-22). Search stdout for CRS-4537.
+  command: "timeout 60 {{ grid_home }}/bin/crsctl check crs"
   register: crs_up
   failed_when: false
   changed_when: false
   when: grid_phase == 'root'
 
-- name: Ensure HAS DOWN at first-pass start (join-mode guard)
-  # A LIVE ohasd makes rootcrs abort at scls init with CRS-4046 — it wants
-  # to spawn/own the daemon itself (run C/D, di 10:50 & 11:05: pre-started
-  # config-less daemon = instant 4046; leftovers from the previous failed
-  # pass = the same). This is why chain2's first ever node1 pass worked:
-  # nothing was running. Join mode needs no daemon: rootcrs reaches OCR
-  # through gipc + on-disk profile.
-  shell: |-
-    {{ grid_home }}/bin/crsctl stop has -f >/dev/null 2>&1 || true
-    sleep 5
-    for n in ohasd.bin crsd.bin ocssd.bin gpnpd.bin mdnsd.bin oraroot.bin; do pkill -9 -x $n 2>/dev/null || true; done
-    # Supervisor loop kill via /proc cmdline scan — immune to the pkill -f
-    # self-match (this script text never appears in any /proc/*/cmdline
-    # being read) and to a MISSING pidfile (run C died before writing it,
-    # and its orphan loop respawned the daemon during run D = 4046 again).
-    for p in $(grep -l "init[.]ohasd" /proc/*/cmdline 2>/dev/null | cut -d/ -f3); do
-      [ "$p" != "$$" ] && kill -9 "$p" 2>/dev/null || true
-    done
-    if [ -f /var/run/init.ohasd.supervisor.pid ]; then kill -9 "$(cat /var/run/init.ohasd.supervisor.pid)" 2>/dev/null || true; rm -f /var/run/init.ohasd.supervisor.pid; fi
-    true
-  changed_when: false
+- name: Run orainstRoot.sh (per node)
+  command: "{{ ora_inventory }}/orainstRoot.sh"
   when:
     - grid_phase == 'root'
-    - crs_up.rc != 0 or 'CRS-4537' not in crs_up.stdout
+    - crs_up.stdout is not search('CRS-4537')
 
-- name: Register join node via addNode.sh (executed on the first node)
-  # root.sh on a join node CANNOT self-register: 'crsctl create scr' aborts
-  # CRS-4046 until addNode.sh has registered the node (di 2026-10-23; the
-  # EL7 precheck gauntlet addNode itself demands is catalogued in skill ref
-  # el7-ohasd-startup.md — oraInst.loc, ntp -x/pidfile/common-server,
-  # domain-XOR-search resolv, pdksh RPM, CVU sysctls). Re-running after a
-  # completed join fails harmlessly ('already part of the cluster') and is
-  # skipped entirely when this node's root.sh is already online.
-  command: >-
-    {{ grid_home }}/oui/bin/addNode.sh -silent -noconfig
-    CLUSTER_NEW_NODES={{ '{' }}{{ inventory_hostname_short }}{{ '}' }}
-    CLUSTER_NEW_VIRTUAL_HOSTNAMES={{ '{' }}{{ inventory_hostname_short }}-vip{{ '}' }}
-  become_user: grid
-  delegate_to: "{{ groups['rac'][0] }}"
-  register: addnode_run
-  failed_when: false
-  changed_when: addnode_run.rc == 0
-  when:
-    - grid_phase == 'root'
-    - inventory_hostname != groups['rac'][0]
-    - crs_up.rc != 0 or 'CRS-4537' not in crs_up.stdout
-
-- name: Ensure join node paramfile knows the DHCP mode
-  # Static-IP installs never write CRS_DHCP_ENABLED into
-  # crsconfig_params, and addNode -noconfig doesn't propagate it; the
-  # join node's root.sh then dies in s_getExistingParams with
-  # 'Parameter CRS_DHCP_ENABLED not defined' AFTER it has already
-  # joined CSS and written its root OCR keys (di 2026-10-24 pass2
-  # rc25). The lab is always static.
-  shell: |
-    P={{ grid_home }}/crs/install/crsconfig_params
-    grep -q CRS_DHCP_ENABLED $P || printf 'CRS_DHCP_ENABLED=false\n' >> $P
-    # crsconfig_lib splits these on COMMA — bare values, no braces.
-    # HOST = registered (short) node name; VIPS = the VIP IP. Braces or
-    # names here make the vip lookup fall through and dump 'eth1' into
-    # the netmask slot (PRKC-1024, di 2026-10-24 night postmortem).
-    grep -q '^CLUSTER_NEW_HOST_NAMES=' $P || printf 'CLUSTER_NEW_HOST_NAMES=%s\n' "$(hostname -s)" >> $P
-    grep -q '^CLUSTER_NEW_VIPS=' $P || printf 'CLUSTER_NEW_VIPS={{ hostvars[inventory_hostname].vip }}\n' >> $P
-  when:
-    - grid_phase == 'root'
-    - inventory_hostname != groups['rac'][0]
-
-- name: Run root.sh (first pass, dies at the EL7 ohasd respawn gap)
-  # No interleave, no async. root.sh's own ~30-min wait happens BEFORE it
-  # logs 'ohasd failed to start' (di 2026-10-21 16:16->16:52 timeline), so
-  # a plain blocking run leaves no window to race. Everything through the
-  # inittab write (OLR, gpnp profile/wallets, ohasdrun=reboot) is left
-  # behind intact for the completion pass below.
+- name: Run GI root.sh (per node — node1 FIRST, join node second)
+  # 19c root.sh is the cluster-join mechanism; order is a hard requirement.
+  # EL8/EL9 do NOT need db11g's ohasd/inittab dance — systemd units are
+  # installed by root.sh itself.
   command: "{{ grid_home }}/root.sh"
+  register: rootsh
+  failed_when: "'FAILURES' in rootsh.stdout | default('')"
   timeout: 3600
-  register: rootsh_first
-  failed_when: false
-  changed_when: true
   when:
     - grid_phase == 'root'
-    - crs_up.rc != 0 or 'CRS-4537' not in crs_up.stdout
+    - crs_up.stdout is not search('CRS-4537')
 
-- name: Classify first-pass failure (informational)
-  # node2's fresh-detect rc25 vs join-OLR rc1 both proceed to the two-pass
-  # dance; profile currency decides which branch root.sh takes (run C 10:50
-  # proved a PRE-STARTED config-less HAS must NOT exist, else scls init
-  # hits CRS-4046). Join detection comes from the LIVE gpnp profile on disk
-  # (SPFile tag), which any earlier gpnpd run has already fetched.
-  shell: |-
-    if [ {{ rootsh_first.rc | default(0) }} -eq 0 ]; then echo CLEAN_PASS; exit 0; fi
-    log=$(ls -t {{ grid_home }}/install/root_*.log 2>/dev/null | head -1)
-    if [ -n "$log" ] && grep -q 'ohasd failed to start' "$log"; then
-      echo EXPECTED_EL7_GAP
-    else
-      echo "NOTE unexpected signature rc={{ rootsh_first.rc }}; last lines:"
-      tail -6 "$log" 2>/dev/null
-    fi
-    exit 0
-  changed_when: false
-  when: rootsh_first is not skipped
-
-- name: Start HAS so ohasd bootstraps from ohasdrun=reboot
-  # The working piece is the init.ohasd RUN loop (the SysV inittab client,
-  # which spawns ohasd.bin itself) — 'crsctl start has' only raises an
-  # orphan ohasd.bin that logs CRS-0715 and dies (di 17:02-17:13 alert log).
-  shell: |-
-    {{ grid_home }}/bin/crsctl stop has -f >/dev/null 2>&1 || true
-    sleep 5
-    # Cleanup split by what pkill -x CAN see: ELF daemons (ohasd.bin,
-    # crsd.bin, ocssd.bin — real comms) by name; the supervisor loop is a
-    # bash COMM (init.ohasd is a script) so it goes by its pidfile.
-    # pkill -f (ANY form) is forbidden here: this script's text lives in
-    # the task shell's AND its ssh-ancestor cmdlines (rc -9, 18:13:40).
-    if [ -f /var/run/init.ohasd.supervisor.pid ]; then
-      kill -9 "$(cat /var/run/init.ohasd.supervisor.pid)" 2>/dev/null || true
-      rm -f /var/run/init.ohasd.supervisor.pid
-    fi
-    for n in ohasd.bin crsd.bin ocssd.bin; do pkill -9 -x $n 2>/dev/null || true; done
-    # ohasd.bin parks in a nanosleep loop until its init.ohasd supervisor
-    # pipe partner exists (di 18:31: ohasd.bin alive, socket bound, check
-    # has = CRS-4639 forever). The restart branch in the SysV loop is the
-    # ONLY code path that execs bin/ohasd restart AND opens the pipe read
-    # side; the reboot-state boot branch deadlocks under systemd (crsctl
-    # start has inside that loop waits on this same pipe). So: set the
-    # autorun state to restart first, then run the loop detached.
-    af=/etc/oracle/scls_scr/$(hostname | cut -d. -f1 | tr 'A-Z' 'a-z')/root/ohasdrun
-    mkdir -p $(dirname $af)
-    echo restart > $af
-    setsid /bin/sh -c 'echo $$ > /var/run/init.ohasd.supervisor.pid; exec /etc/rc.d/init.d/init.ohasd run' >>/var/log/init.ohasd.supervisor 2>&1 &
-    for i in $(seq 1 48); do
-      sleep 5
-      {{ grid_home }}/bin/crsctl check has 2>/dev/null && exit 0
-    done
-    echo "HAS did not come up"
-    exit 1
-  changed_when: true
-  when:
-    - rootsh_first is not skipped
-    - rootsh_first.rc != 0
-
-- name: Run root.sh (second pass, completes with a live stack)
-  command: "{{ grid_home }}/root.sh"
-  timeout: 1800
-  register: rootsh_second
-  when:
-    - rootsh_first is not skipped
-    - rootsh_first.rc != 0
-
-- name: OCR-IPC sanity (grid-visible); supervisor-cycle if crsd wedged
-  # A crsd left in bootstrap mode by interrupted passes serves crsctl
-  # checks but not OCR IPC -> later runInstaller reports INS-35354 on a
-  # healthy cluster (di 2026-10-22 20:08 postmortem). Probe with GRID,
-  # the only OCR-registered user before the DB home's root.sh adds
-  # oracle's privcfg: oracle-user ocrcheck legitimately PROT-602/
-  # ORA-01017s on a fresh single-node cluster (di 2026-10-24 false
-  # alarm, cost a whole build). Never cycle via 'crsctl start crs' on
-  # EL7 — that raises an orphaned ohasd; use the supervisor loop.
-  shell: |-
-    ocr() { su -s /bin/bash $1 -c "ORACLE_HOME={{ grid_home }} {{ grid_home }}/bin/ocrcheck" 2>&1 | grep -q "Version"; }
-    if ocr grid && ocr oracle; then
-      echo OCR_IPC_OK
-    else
-      {{ grid_home }}/bin/crsctl stop crs -f >/dev/null 2>&1 || true
-      sleep 5
-      for n in ohasd.bin crsd.bin ocssd.bin; do pkill -x $n 2>/dev/null || true; done
-      if [ -f /var/run/init.ohasd.supervisor.pid ]; then kill "$(cat /var/run/init.ohasd.supervisor.pid)" 2>/dev/null || true; fi
-      mkdir -p /etc/oracle/scls_scr/{{ ansible_hostname }}/root
-      echo restart > /etc/oracle/scls_scr/{{ ansible_hostname }}/root/ohasdrun
-      sleep 1
-      setsid /bin/sh -c 'echo $$ > /var/run/init.ohasd.supervisor.pid; exec /etc/rc.d/init.d/init.ohasd run' >> /var/log/init.ohasd.supervisor 2>&1 &
-      for i in $(seq 1 30); do
-        sleep 10
-        {{ grid_home }}/bin/crsctl check crs 2>/dev/null | grep -q 4537 && break
-      done
-      ocr grid && ocr oracle && echo OCR_IPC_CYCLED || exit 1
-    fi
-  register: ocr_ipc
-  changed_when: "'CYCLED' in ocr_ipc.stdout"
-  retries: 2
+- name: Wait for CRS on this node
+  shell: "{{ grid_home }}/bin/crsctl check crs | grep -q 'CRS-4537'"
+  register: crs_wait
+  retries: 60
   delay: 20
-  until: ocr_ipc.rc == 0
-  failed_when: ocr_ipc.rc != 0
-  # Only meaningful right after THIS node's root passes; on healthy rebuilds
-  # root.sh is skipped and single-node OCR-IPC quirks are not blockers — the
-  # node2 join itself validates what matters (di 2026-10-23: unconditional
-  # form here deadlocked the whole build on a benign oracle ocrcheck edge).
-  when:
-    - grid_phase == 'root'
-    - rootsh_first is not skipped
-
-- name: Show root.sh result tail
-  debug:
-    msg: "{{ (rootsh_second.stdout_lines | default(rootsh_first.stdout_lines | default(['(root stage skipped or already online on this node)']))) | default([]) }}"
+  until: crs_wait.rc == 0
+  changed_when: false
   when: grid_phase == 'root'
 
-# ------------------------------------------------------------------ DGs
-# Existence MUST be parsed from `crsctl stat res -t` output — both
-# `asmcmd dg_exists` and `crsctl stat res <dg> -p` return rc 0 for absent
-# disk groups (verified 2026-10-15/19 in the sibling lab). Do not "simplify"
-# these guards back to rc checks.
-- name: Read cluster resource table
-  command: "{{ grid_home }}/bin/crsctl stat res -t"
+# ------------------------------------------------------------------ disk groups
+- name: Create DATA + FRA disk groups (node1; asmca after root.sh)
+  # Guard on the CRS RESOURCE TABLE, not asmcmd rc — 'dg_exists' returns 0
+  # for nonexistent groups (tests rac2 2026-10-19, silent skipped creates).
+  shell: |
+    export ORACLE_HOME={{ grid_home }}
+    {{ grid_home }}/bin/crsctl stat res -t | grep -q "ora.{{ item.name }}.dg" || \
+      {{ grid_home }}/bin/asmca -silent -createDiskGroup \
+        -diskGroupName {{ item.name }} \
+        -diskString '{{ asm_diskstring }}' \
+        -disk /dev/oracleasm/disks/{{ item.name }} \
+        -redundancy EXTERNAL -au_size 4
+  loop:
+    - { name: "{{ asm_diskgroup_data }}" }
+    - { name: "{{ asm_diskgroup_fra }}" }
   become_user: grid
-  register: res_table
-  changed_when: false
-  when:
-    - grid_phase == 'dgs'
-    - inventory_hostname == groups['rac'][0]
+  when: grid_phase == 'dgs'
 
-- name: Create DATA disk group
-  command: >-
-    {{ grid_home }}/bin/asmca -silent -createDiskGroup
-    -diskGroupName DATA
-    -disk '/dev/oracleasm/disks/DATA'
-    -redundancy EXTERNAL -au_size 4
-    -compatible.asm 11.2 -compatible.rdbms 11.2
-  become_user: grid
-  environment:
-    ORACLE_HOME: "{{ grid_home }}"
-    ORACLE_SID: "+ASM{{ node_num }}"
-  when:
-    - grid_phase == 'dgs'
-    - inventory_hostname == groups['rac'][0]
-    - res_table.stdout is not search('(?i)ora\\.data\\.dg')
-
-- name: Create FRA disk group
-  command: >-
-    {{ grid_home }}/bin/asmca -silent -createDiskGroup
-    -diskGroupName FRA
-    -disk '/dev/oracleasm/disks/FRA'
-    -redundancy EXTERNAL -au_size 4
-    -compatible.asm 11.2 -compatible.rdbms 11.2
-  become_user: grid
-  environment:
-    ORACLE_HOME: "{{ grid_home }}"
-    ORACLE_SID: "+ASM{{ node_num }}"
-  when:
-    - grid_phase == 'dgs'
-    - inventory_hostname == groups['rac'][0]
-    - res_table.stdout is not search('(?i)ora\\.fra\\.dg')
-
-- name: Final cluster verification
-  shell: >-
-    {{ grid_home }}/bin/crsctl check cluster -all &&
+- name: Cluster verification
+  shell: |
+    {{ grid_home }}/bin/crsctl check cluster -all | grep -c ONLINE | grep -qv 0
     {{ grid_home }}/bin/olsnodes -n -s
+    {{ grid_home }}/bin/crsctl query votedisk
+    {{ grid_home }}/bin/asmcmd lsdg | grep -cE "^ *{{ asm_diskgroup_crs }}|^ *{{ asm_diskgroup_data }}|^ *{{ asm_diskgroup_fra }}"
   become_user: grid
-  register: cluster_ok
-  retries: 10
-  delay: 30
-  until: cluster_ok.rc == 0
+  register: verify_out
   changed_when: false
-  when:
-    - grid_phase == 'dgs'
-    - inventory_hostname == groups['rac'][0]
+  when: grid_phase == 'dgs'
 
-- name: Cluster status
+- name: Show verification
   debug:
-    msg: "{{ cluster_ok.stdout_lines | default(['(dgs stage not run on this node)']) }}"
+    msg: "{{ verify_out.stdout_lines | default([]) }}"
   when: grid_phase == 'dgs'

@@ -1,11 +1,11 @@
 # ============================================================
-# Playbook 04 — Oracle Database 11.2.0.4 software-only install
-# Same phase model as 03 (node1 propagates; root.sh per node after).
+# Playbook 04 — RDBMS 19c software (home: /u01/app/oracle/product/19.0.0/dbhome_1)
+# Per-node LOCAL image install (tests lab's proven 19c method — the
+# node1-propagating model dies on base-19.3 CVU remote checks).
 # Run: ansible-playbook playbooks/04-install-db.yml
-# Requires: playbook 03 completed (cluster online + CRS DG).
 # ============================================================
 
-- name: RDBMS preflight (media visible)
+- name: 19c DB preflight (media)
   hosts: rac
   gather_facts: false
   become: true
@@ -14,8 +14,8 @@
   roles:
     - database
 
-- name: RDBMS software install (node1; propagates to node2)
-  hosts: rac[0]
+- name: 19c DB software + RU (per node; parallel is SAFE here)
+  hosts: rac
   gather_facts: false
   become: true
   vars:
@@ -23,17 +23,25 @@
   roles:
     - database
 
-- name: DB home root.sh (setuid oracle binary) — every node, node1 first
-  hosts: rac
+- name: 19c DB root.sh — node1
+  hosts: rac[0]
   gather_facts: false
   become: true
-  serial: 1
   vars:
     db_stage: root
   roles:
     - database
 
-- name: Post-install verification + client TNS aliases
+- name: 19c DB root.sh — node2
+  hosts: rac[1]
+  gather_facts: false
+  become: true
+  vars:
+    db_stage: root
+  roles:
+    - database
+
+- name: 19c DB home verify (binary + setuid + RU registered)
   hosts: rac
   gather_facts: false
   become: true

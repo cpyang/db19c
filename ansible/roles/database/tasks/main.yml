@@ -1,170 +1,159 @@
 # ============================================================
-# Role: database — Oracle RDBMS 11.2.0.4 software (media: 1of7 + 2of7)
+# Role: database — Oracle RDBMS 19c software (EE, base 19.3 + RU 19.31)
 #
-# Same install model as the grid role: runInstaller on node1 propagates
-# to the peers listed in CLUSTER_NODES over oracle's ssh trust.
-#   stage=check     media present (node1 mount)
-#   stage=software  node1: unzip both parts, rsp, runInstaller
-#   stage=root      per node: $OH/root.sh (setuid oracle binary)
-#   stage=verify    per node: bin/oracle real + setuid; tnsnames alias
+# 19c install model (proven by oracle_dr_on_aws/tests on OL8):
+# unzip db_home.zip INTO the home, replace bundled OPatch, then a
+# PER-NODE local `runInstaller -silent -applyRU` listing only the local
+# node in CLUSTER_NODES. The node1-drives-everything style trips base-19.3
+# CVU remote checks (INS-06006/PRVF-5311) — per-node install bypasses CVU
+# networking entirely (tests 2026-10-16 postmortem).
 #
-# bin/oracle SIZE guard: an install that never propagated leaves the
-# remote home's bin/oracle as the zip's 0-byte placeholder while the
-# install still reports success — size (not existence) is the check.
+#   stage=check     media present
+#   stage=software  per node: extract, OPatch, RU, image-install
+#   stage=root      per node: $OH/root.sh
+#   stage=verify    bin/oracle size + setuid + RU registered
 # ============================================================
 
 - name: Resolve stage from play vars
-  # see grid role: never overwrite db_stage itself (facts beat play vars)
   set_fact:
     db_phase: "{{ db_stage | default('check') }}"
 
 # ------------------------------------------------------------------ check
-- name: Confirm database media is visible on the staging mount
+- name: Confirm DB media is visible on the staging mount
   stat:
     path: "{{ oracle_stage_dir }}/{{ item }}"
-  loop: "{{ oracle_database_zips }}"
+  loop:
+    - "{{ db_base_zip }}"
+    - "{{ db_ru_zip }}"
+    - "{{ opatch_zip }}"
   register: db_media
   failed_when: not db_media.stat.exists
-  when:
-    - db_phase == 'check'
-    - inventory_hostname == groups['rac'][0]   # only node1 runs the installer
+  when: db_phase == 'check'
 
 # ------------------------------------------------------------------ software
-- name: Detect a fully-populated DB home (bin/oracle > 1 MB)
-  stat:
-    path: "{{ oracle_home }}/bin/oracle"
-  register: db_binary
+- name: Create DB home dir
+  file:
+    path: "{{ oracle_home }}"
+    state: directory
+    owner: oracle
+    group: "{{ oracle_installer_group }}"
+    mode: '0775'
   when: db_phase == 'software'
 
-- name: Unarchive Database media (two parts overlay into database/)
+- name: Detect extracted DB software (bin/sqlplus appears in the zip extract)
+  stat:
+    path: "{{ oracle_home }}/bin/sqlplus"
+  register: db_bin_sqlplus
+  when: db_phase == 'software'
+
+- name: Extract DB base release INTO the home (per node)
   unarchive:
-    src: "{{ oracle_stage_dir }}/{{ item }}"
-    dest: "{{ oracle_media_dir }}"
+    src: "{{ oracle_stage_dir }}/{{ db_base_zip }}"
+    dest: "{{ oracle_home }}"
     remote_src: true
     owner: oracle
     group: "{{ oracle_installer_group }}"
   become_user: oracle
-  loop: "{{ oracle_database_zips }}"
   when:
     - db_phase == 'software'
-    - not (db_binary.stat.exists | default(false) and db_binary.stat.size | default(0) > 1048576)
-    - inventory_hostname == groups['rac'][0]
+    - not db_bin_sqlplus.stat.exists
 
-- name: Render db_install.rsp
+- name: Replace bundled OPatch in the DB home (per node; NO existence guard)
+  shell: |
+    rm -rf {{ oracle_home }}/OPatch
+    unzip -q {{ oracle_stage_dir }}/{{ opatch_zip }} -d {{ oracle_home }}
+  become_user: oracle
+  when: db_phase == 'software'
+
+- name: Extract DB RU (per node — install is local)
+  unarchive:
+    src: "{{ oracle_stage_dir }}/{{ db_ru_zip }}"
+    dest: "{{ ru_stage_dir }}/db"
+    remote_src: true
+    owner: oracle
+    group: "{{ oracle_installer_group }}"
+  become_user: oracle
+  when: db_phase == 'software'
+
+- name: Check current bin/oracle state
+  stat:
+    path: "{{ oracle_home }}/bin/oracle"
+  register: db_bin
+  when: db_phase == 'software'
+
+- name: Detach stale DB home registrations (recovery guard)
+  # INS-32826 comes from TWO registries: central inventory entries surviving
+  # a wiped home AND the home-local $OH/inventory marker detachHome itself
+  # leaves. Flagless detach silently no-ops — use the full incantation
+  # (tests rac1 2026-10-16).
+  shell: |
+    if grep -q 'LOC="{{ oracle_home }}"' {{ ora_inventory }}/ContentsXML/inventory.xml 2>/dev/null \
+         && [ ! -s {{ oracle_home }}/bin/oracle ]; then
+      {{ oracle_home }}/runInstaller -detachHome -silent -force -local \
+        -oracleHome {{ oracle_home }} 2>&1 | tail -4
+      [ -d {{ oracle_home }}/inventory ] && rm -rf {{ oracle_home }}/inventory
+      echo DETACHED_STALE_HOME
+    fi
+  become_user: oracle
+  when:
+    - db_phase == 'software'
+    - db_bin.stat.size | default(0) < 1000000
+
+- name: Render db_install.rsp (per node)
   template:
-    src: db_install.rsp.j2
-    dest: "{{ grid_install_tmp }}/db_install.rsp"
+    src: db_install19.rsp.j2
+    dest: "{{ grid_install_tmp }}/db_install19.rsp"
     owner: oracle
     group: "{{ oracle_installer_group }}"
     mode: '0600'
-  when:
-    - db_phase == 'software'
-    - inventory_hostname == groups['rac'][0]
-
-# 11.2.0.4's OIII parser sets the CRS-home flag from the HOME attribute
-# CRS="true" (getValue("CRS")) — GRID="true" is the 12.2+ token and is
-# IGNORED here: without CRS the DB installer takes the vendor-clusterware
-# path, sees 0 nodes and aborts INS-35354 on a healthy GI (di 2026-10-24).
-- name: Ensure GI home carries CRS="true" in the central inventory
-  shell: |-
-    # idempotent attribute guard on the grid HOME line
-    F=/u01/app/oraInventory/ContentsXML/inventory.xml
-    sed -i '/LOC="{{ grid_home }}"/{/CRS=/!s#\(GRID="true"\)#\1 CRS="true"#; /GRID=/!s#\(IDX="[0-9]*"\)#\1 CRS="true"#}' "$F"
-    grep -a '{{ grid_home }}' "$F" | grep -ac 'CRS="true"'
-  args:
-    executable: /bin/bash
-  register: crs_attr
-  changed_when: true
-  failed_when: crs_attr.stdout|int < 1
-  when:
-    - db_phase == 'software'
-    - inventory_hostname == groups['rac'][0]
-
-- name: Install RDBMS software (node1; propagates to CLUSTER_NODES)
-  # Single-line shell:11.2 silent install runs foreground to completion.
-  # MUST NOT carry -waitforcompletion:
-  # its wizard-reinit path blanks the ClusterContext (getCSSConfigType
-  # configType=false in the trace) and runInstaller aborts INS-35354 no
-  # matter how healthy the cluster is (di 2026-10-24 — this flag poisoned
-  # the whole multi-day hunt). Without it, silent install runs to
-  # completion in the foreground.
-  shell: "{{ oracle_media_dir }}/database/runInstaller -silent -responseFile {{ grid_install_tmp }}/db_install.rsp -ignorePrereq"
-  become_user: oracle
-  environment:
-    # OCR registers nodes by BARE name (olsnodes). The DB installer
-    # validates 'is THIS system a cluster member' by matching
-    # ORACLE_HOSTNAME against that registry — the inventory FQDN makes
-    # a perfectly healthy cluster read as INS-35354 (di 2026-10-24,
-    # fourth independent root cause of the same error string).
-    ORACLE_HOSTNAME: "{{ hostvars[inventory_hostname].short_name | default(inventory_hostname) }}"
-    TMPDIR: "{{ grid_install_tmp }}"
-    LANG: en_US.UTF-8
-  register: db_install
-  failed_when: db_install.rc != 0
-  timeout: 5400
-  changed_when: true
-  when:
-    - db_phase == 'software'
-    - not (db_binary.stat.exists | default(false) and db_binary.stat.size | default(0) > 1048576)
-    - inventory_hostname == groups['rac'][0]
-
-- name: Show installer tail (empty list if the task was skipped)
-  debug:
-    msg: "{{ (db_install.stderr_lines | default([]))[-10:] }}"
   when: db_phase == 'software'
 
-# ------------------------------------------------------------------ root.sh
-# Idempotent and cheap (relink/setuid) — run on EVERY node every phase run;
-# a node whose propagation died mid-copy NEEDS the re-run.
-- name: Run {{ oracle_home }}/root.sh on this node
-  command: "{{ oracle_home }}/root.sh"
-  register: db_rootsh
-  failed_when: db_rootsh.rc != 0
-  timeout: 900
-  changed_when: true
-  when: db_phase == 'root'
-
-- name: Show root.sh tail
-  debug:
-    msg: "{{ (db_rootsh.stdout_lines | default(['(root stage not run here)']))[-8:] }}"
-  when: db_phase == 'root'
-
-# ------------------------------------------------------------------ verify
-- name: Verify bin/oracle on every node (propagation completeness)
-  stat:
-    path: "{{ oracle_home }}/bin/oracle"
-  register: db_bin_check
-  failed_when: >-
-    not db_bin_check.stat.exists or db_bin_check.stat.size < 1048576
-  when: db_phase == 'verify'
-
-- name: Verify setuid bit on bin/oracle (root.sh ran on THIS node)
-  shell: >-
-    /usr/bin/stat -c '%a %U %G' {{ oracle_home }}/bin/oracle
-  register: setuid_check
-  changed_when: false
-  failed_when: not (setuid_check.stdout.split(' ')[0] is match('67.*'))
-  when: db_phase == 'verify'
-
-- name: Client TNS aliases (SCAN + per-instance; listeners are CRS resources)
-  template:
-    src: tnsnames.ora.j2
-    dest: "{{ oracle_home }}/network/admin/tnsnames.ora"
-    owner: oracle
-    group: "{{ oracle_installer_group }}"
-    mode: '0644'
-  when: db_phase == 'verify'
-
-- name: sqlplus version (needs ORACLE_HOME in env or it dies SP2-0667)
-  command: "{{ oracle_home }}/bin/sqlplus -version"
+- name: Install DB software + RU (per node, local image install)
+  command: >-
+    {{ oracle_home }}/runInstaller -silent
+    -applyRU {{ ru_stage_dir }}/db/{{ db_ru_id }}
+    -responseFile {{ grid_install_tmp }}/db_install19.rsp
+    oracle.install.db.CLUSTER_NODES={{ short_name }}
+    -ignorePrereqFailure
   become_user: oracle
   environment:
-    ORACLE_HOME: "{{ oracle_home }}"
-  register: sqlplus_v
-  changed_when: false
-  when: db_phase == 'verify'
+    # base-19.3 CVU has no OL9 entry -> INS-08101 NPE; the marker keeps the
+    # pre-patch phase quiet (tests lab §db). -applyRU lands RU 19.31 whose
+    # CVU knows OL9 natively.
+    CV_ASSUME_DISTID: OEL7.8
+    TMPDIR: "{{ grid_install_tmp }}"
+  register: db_install
+  failed_when: db_install.rc not in [0, 6]
+  timeout: 5400
+  when:
+    - db_phase == 'software'
+    - db_bin.stat.size | default(0) < 1000000
 
-- name: Show version
-  debug:
-    msg: "{{ sqlplus_v.stdout | default('(skipped)') }}"
+# ------------------------------------------------------------------ root.sh
+- name: DB home already rooted? (setuid oracle binary)
+  shell: "stat -c '%A' {{ oracle_home }}/bin/oracle | grep -q '^.-ws'"
+  register: db_setuid
+  failed_when: false
+  changed_when: false
+  when: db_phase == 'root'
+
+- name: Run $OH/root.sh (per node)
+  command: "{{ oracle_home }}/root.sh"
+  register: dbroot
+  failed_when: "'FAILURES' in dbroot.stdout | default('')"
+  timeout: 1800
+  when:
+    - db_phase == 'root'
+    - db_setuid.rc != 0
+
+# ------------------------------------------------------------------ verify
+- name: Verify DB home
+  # bin/oracle SIZE matters: a home whose install never finished keeps the
+  # zip's 0-byte placeholder (db11g lesson, applies to 19c the same way).
+  shell: |
+    test $(stat -c %s {{ oracle_home }}/bin/oracle) -gt 1000000
+    stat -c '%A' {{ oracle_home }}/bin/oracle | grep -q '^.-ws'
+    {{ oracle_home }}/OPatch/opatch lspatches | grep -q "^{{ db_ru_id }};"
+  become_user: oracle
+  changed_when: false
   when: db_phase == 'verify'

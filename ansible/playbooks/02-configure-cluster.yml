@@ -1,5 +1,5 @@
 # ============================================================
-# Playbook 02 — cluster prerequisites: shared ASM disks + ssh/DNS trust
+# Playbook 02 — cluster prerequisites: shared ASM disks + ssh/DNS trust (unchanged model from db11g)
 # Run: ansible-playbook playbooks/02-configure-cluster.yml
 # ============================================================
 

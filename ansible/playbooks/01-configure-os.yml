@@ -1,9 +1,9 @@
 # ============================================================
-# Playbook 01 — OS preparation for 11.2.0.4 RAC (idempotent)
+# Playbook 01 — OS preparation for GI 19c + DB 19c/11g on OL9 (idempotent)
 # Run: ansible-playbook playbooks/01-configure-os.yml
 # ============================================================
 
-- name: Configure OS prerequisites for Oracle 11.2.0.4 RAC
+- name: Configure OS prerequisites (EL9, GI 19c + DB 19c/11g)
   hosts: rac
   gather_facts: true
   become: true

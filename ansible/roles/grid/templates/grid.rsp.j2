@@ -1,78 +1,50 @@
-# ============================================================
-# Oracle Grid Infrastructure 11.2.0.4 silent response file.
-# Key SET AND ORDER verified against the shipped template
-# p13390677_112040_Linux-x86-64_3of7.zip -> grid/response/grid_install.rsp
-# (saved at ansible/reference/grid_install.rsp.orig). This schema is the
-# FLAT, section-less format — do not restyle it with [GENERAL]/[options]
-# blocks and do not add 19c-era keys (unknown keys abort OUI parsing).
-# ============================================================
-oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v11_2_0
-ORACLE_HOSTNAME={{ inventory_hostname }}
+# 19c GI (CRS_CONFIG) response — rendered by the grid role.
+# Keys cross-checked against oracle_dr_on_aws/tests/response_files/grid_install_rac1.rsp
+# (a proven-working 19.31 gridSetup on this lab family).
+oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
 INVENTORY_LOCATION={{ ora_inventory }}
-SELECTED_LANGUAGES=en
 oracle.install.option=CRS_CONFIG
 ORACLE_BASE={{ grid_base }}
 ORACLE_HOME={{ grid_home }}
 
-# OS groups (ASM administration belongs to grid; oracle is NOT the owner)
-oracle.install.asm.OSDBA={{ oracle_asm_group }}
+# ASM privileges (fixed GIDs from roles/common)
+oracle.install.asm.OSDBA={{ oracle_asm_dba_group }}
 oracle.install.asm.OSOPER={{ oracle_asm_oper_group }}
 oracle.install.asm.OSASM={{ oracle_asm_group }}
 
-# Cluster + SCAN (static DNS via dnsmasq/hosts, no GNS)
+# SCAN via local dnsmasq (see roles/common DNS block)
+oracle.install.crs.config.scanType=LOCAL_SCAN
 oracle.install.crs.config.gpnp.scanName={{ scan_name }}
 oracle.install.crs.config.gpnp.scanPort={{ scan_port }}
+
+oracle.install.crs.config.ClusterConfiguration=STANDALONE
 oracle.install.crs.config.clusterName={{ cluster_name }}
 oracle.install.crs.config.gpnp.configureGNS=false
-oracle.install.crs.config.gpnp.gnsSubDomain=
-oracle.install.crs.config.gpnp.gnsVIPAddress=
-
-# Explicit VIPs — autoConfigure=true against host-only NICs is the
-# PRKC-1168 "AUTO address invalid" failure class in labs.
+# VIPs STATIC via /etc/hosts — db11g hit PRKC-1168 with AUTO on 11g's
+# root.sh; the tests lab used AUTO+hosts and lived, but static is the
+# smaller failure surface (README troubleshooting line).
 oracle.install.crs.config.autoConfigureClusterNodeVIP=false
-# Install-phase cluster membership = FIRST NODE ONLY. Listing rac2 here
-# makes runInstaller AttachHome + stamp SYSTEM.version.hostnames.<n2> in
-# the OCR without any node registration — that orphan key then makes
-# addNode refuse ('already part of the cluster') and root.sh's create scr
-# 4046 forever (di 2026-10-23 phantom postmortem). node2's genuine
-# registration is addNode.sh's job, run by the root phase before its
-# root.sh (see roles/grid 'Register join node' task).
-oracle.install.crs.config.clusterNodes={{ hostvars[groups['rac'][0]].short_name }}:{{ hostvars[groups['rac'][0]].short_name }}-vip.{{ domain_name }}
+oracle.install.crs.config.clusterNodes={% for n in groups['rac'] %}{{ hostvars[n].short_name }}:{{ hostvars[n].short_name }}-vip{{ if not loop.last }},{{ endif }}{% endfor %}
 
-# Interfaces resolved BY ADDRESS at runtime (format iface:subnet:usage,
-# 1=public 2=private 3=unused — the NAT NIC must be listed :3 or CVU probes it).
-oracle.install.crs.config.networkInterfaceList={{ pub_iface }}:{{ network_public }}.0:1,{{ priv_iface }}:{{ network_private }}.0:2,{{ nat_iface | default('eth0') }}:{{ nat_subnet | default('10.0.2.0') }}:3
+# NIC roles resolved BY ADDRESS at runtime (never ethX — db11g lesson).
+# :1 = public, :5 = cluster interconnect (ASM+private).
+oracle.install.crs.config.networkInterfaceList={{ pub_iface }}:{{ network_public_subnet }}:1,{{ priv_iface }}:{{ network_private_subnet }}:5
 
-# Storage: ASM; OCR+voting land in the single disk group defined below
-oracle.install.crs.config.storageOption=ASM_STORAGE
-oracle.install.crs.config.sharedFileSystemStorage.diskDriveMapping=
-oracle.install.crs.config.sharedFileSystemStorage.votingDiskLocations=
-oracle.install.crs.config.sharedFileSystemStorage.votingDiskRedundancy=NORMAL
-oracle.install.crs.config.sharedFileSystemStorage.ocrLocations=
-oracle.install.crs.config.sharedFileSystemStorage.ocrRedundancy=NORMAL
+# No GIMR (lab disk budget), no IPMI, plain ASM (NOT ASMFD: 11.2 homes
+# cannot use ASMFD — Doc 2341119.1 — and 11g is part of this cluster).
+oracle.install.crs.configureGIMR=false
+oracle.install.asm.configureGIMRDataDG=false
+oracle.install.crs.config.storageOption=FLEX_ASM_STORAGE
 oracle.install.crs.config.useIPMI=false
-oracle.install.crs.config.ipmi.bmcUsername=
-oracle.install.crs.config.ipmi.bmcPassword=
 
-# ASM — first (and install-time only) disk group CRS holds OCR + voting.
-# DATA/FRA are created by asmca after root.sh (playbook 03, stage=dgs).
-oracle.install.asm.SYSASMPassword={{ asm_monitor_password }}
-oracle.install.asm.diskGroup.name=CRS
+# OCR + voting on the CRS group, EXTERNAL (single 12G disk, lab).
+oracle.install.asm.SYSASMPassword={{ sys_password }}
+oracle.install.asm.monitorPassword={{ asm_monitor_password }}
+oracle.install.asm.diskGroup.name={{ asm_diskgroup_crs }}
 oracle.install.asm.diskGroup.redundancy=EXTERNAL
 oracle.install.asm.diskGroup.AUSize=4
-oracle.install.asm.diskGroup.disks=/dev/oracleasm/disks/CRS
+oracle.install.asm.diskGroup.disks=/dev/oracleasm/disks/{{ asm_diskgroup_crs }}
 oracle.install.asm.diskGroup.diskDiscoveryString={{ asm_diskstring }}
-oracle.install.asm.monitorPassword={{ asm_monitor_password }}
-oracle.install.crs.upgrade.clusterNodes=
-oracle.install.asm.upgradeASM=false
 
-# No MyOracle support / autoupdates in a lab
-oracle.installer.autoupdates.option=SKIP_UPDATES
-oracle.installer.autoupdates.downloadUpdatesLoc=
-AUTOUPDATES_MYORACLESUPPORT_USERNAME=
-AUTOUPDATES_MYORACLESUPPORT_PASSWORD=
-PROXY_HOST=
-PROXY_PORT=
-PROXY_USER=
-PROXY_PWD=
-PROXY_REALM=
+oracle.install.config.managementOption=NONE
+oracle.install.crs.rootconfig.executeRootScript=false

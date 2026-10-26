@@ -1,20 +1,20 @@
 #!/bin/bash
 # ============================================================
-# swap_setup.sh — configure per-node swap on the 6 GB node-exclusive VDI.
-# 11.2.0.4 CVU wants swap ~= RAM (6 GB here); the box root disk ships only a
-# small/absent swap LV. Ported from the sibling 19c lab (same VBox quirks):
+# swap_setup.sh — configure per-node swap on the 16 GB node-exclusive VDI.
+# 19c CVU wants swap ~= RAM (16 GB here; PRVF-7573); the box root disk ships
+# only a small swap LV. Ported from the sibling 19c lab (same VBox quirks):
 #   * disk located by EXACT sector size, never by /dev/sdX letter
-#   * EL7-minimal guests may lack parted/sgdisk → scripted fdisk over stdin
+#   * minimal guests may lack parted/sgdisk → scripted fdisk over stdin
 #     (fdisk's own ioctl re-reads the table; no partprobe needed)
 #   * run provisioner "always": idempotent, safe every boot
 #   * this disk is OUTSIDE the ASM footprint — asm_setup.sh ignores it (it
-#     only keys the 12/20/10 GB shared disks), so ASM can never claim it
+#     only keys the 12/30/10 GB shared disks), so ASM can never claim it
 # ============================================================
 set -u
 SUDO=""
 [ "$(id -u)" != "0" ] && SUDO="sudo"
 
-SWAP_SIZE_SECTORS=$((6 * 1024 * 1024 * 1024 / 512))   # 6 GiB → 12582912
+SWAP_SIZE_SECTORS=$((16 * 1024 * 1024 * 1024 / 512))   # 16 GiB → 33554432
 
 wait_dev() { for _ in $(seq 40); do [ -b "$1" ] && return 0; sleep 0.5; done; return 1; }
 

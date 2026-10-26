@@ -1,5 +1,5 @@
 # ============================================================
-# RAC cluster variables
+# RAC cluster variables (GI 19c + DB 19c CDB + 11g single instance)
 # ============================================================
 
 # Interface roles are resolved BY ADDRESS at runtime (never ethX — the box
@@ -11,18 +11,31 @@ network_private_subnet: "{{ network_private }}.0"
 grid_install_tmp: /u01/tmp
 scan_port: 1521
 
-# Disk groups: CRS holds OCR+voting (created by the installer);
-# DATA and FRA are created by asmca after root.sh.
+# Disk groups: CRS holds OCR+voting (created by the installer, EXTERNAL
+# redundancy — lab, no mirroring); DATA and FRA are created by asmca after
+# root.sh. GI 19c + 11g homes: ASMFD is NOT an option here (11.2 DBs cannot
+# live on ASMFD, Doc 2341119.1) — plain udev symlinks via scripts/asm_setup.sh.
 asm_diskgroup_crs: CRS
 asm_diskgroup_data: DATA
 asm_diskgroup_fra: FRA
 asm_diskstring: "/dev/oracleasm/disks/*"
 
-# --- Database (playbook 05) ---
-db_name: rac
-db_unique_name: rac
-db_sid_prefix: rac            # instances rac1, rac2 (= prefix + node_num)
+# --- 19c database (playbook 05, RAC CDB) ---
+db_name: db19c
+db_unique_name: db19c
+db_sid_prefix: db19            # instances db191, db192 (= prefix + node_num)
 db_charset: AL32UTF8
 db_ncharset: AL16UTF16
 db_memory_percentage: 40
+enable_cdb: true
+pdb_name: pdb0
 dbca_template: "{{ oracle_home }}/assistants/dbca/templates/General_Purpose.dbc"
+
+# --- 11.2.0.4 database (playbook 05, single instance registered in GI 19c) ---
+# Lives on node1 (preferred); srvctl-managed, ASM storage in +DATA. GI 19c
+# managing an 11.2.0.4 home is documented ("11.2.0.3 or later with GI 19c").
+db11_name: db11
+db11_sid: db11
+db11_unique_name: db11
+db11_home: "{{ oracle11_home }}"
+db11_node: db19c-rac1

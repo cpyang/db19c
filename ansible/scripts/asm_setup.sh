@@ -27,7 +27,7 @@ NODE_ROLE=${1:?usage: asm_setup.sh node1|node2}
 # mis-typed $(( )) silently became a subshell here and died on first boot)
 declare -A WANT=(
   [CRS]=25165824     # 12 GB
-  [DATA]=41943040    # 20 GB
+  [DATA]=62914560    # 30 GB
   [FRA]=20971520     # 10 GB
 )
 

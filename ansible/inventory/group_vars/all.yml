@@ -1,25 +1,38 @@
 # ============================================================
-# Oracle 11.2.0.4 RAC — global variables
+# GI 19c + DB 19c + DB 11.2.0.4 — global variables (Oracle Linux 9)
 # ============================================================
 
-# --- Installation media (host staging/ shared read-only at /u01/staging) ---
-# Media mapping VERIFIED against the zips themselves (2026-10-21):
-#   1of7 + 2of7 -> database/  (RDBMS software)
-#   3of7        -> grid/      (Grid Infrastructure — NOT 1of7!)
-#   4of7-7of7   -> client/gateways/examples/docs — not needed here
+# --- Installation media (repo staging/ symlinks -> host ~/staging, mounted
+# read-only at /u01/staging; VBox shared folders follow the symlinks) ---
+# Media identity VERIFIED against di's library (2026-10-26):
+#   LINUX.X64_193000_grid_home.zip / _db_home.zip  = 19.3 BASE (unzip into OH)
+#   p39036936 = GI  RU 19.31.0.0.0 (gridSetup -applyRU)
+#   p39034528 = DB  RU 19.31.0.0.0 (runInstaller -applyRU / opatch)
+#   p6880880  = OPatch (REPLACE the home's bundled one before any opatch call)
+#   p13390677_1of7+2of7 = 11.2.0.4 RDBMS software (3of7 = GI — NOT installed;
+#   GI here is 19c)
 oracle_stage_dir: /u01/staging
 oracle_media_dir: /u01/media
-oracle_grid_zip: "p13390677_112040_Linux-x86-64_3of7.zip"
-oracle_database_zips:
+gi_base_zip: "LINUX.X64_193000_grid_home.zip"
+db_base_zip: "LINUX.X64_193000_db_home.zip"
+gi_ru_zip: "p39036936_190000_Linux-x86-64.zip"
+db_ru_zip: "p39034528_190000_Linux-x86-64.zip"
+opatch_zip: "p6880880_190000_Linux-x86-64.zip"
+gi_ru_id: "39036936"
+db_ru_id: "39034528"
+ru_stage_dir: /u01/patches
+# 11.2.0.4 media
+oracle11_database_zips:
   - "p13390677_112040_Linux-x86-64_1of7.zip"
   - "p13390677_112040_Linux-x86-64_2of7.zip"
 
 # --- Software locations ---
-oracle_sw_version: "11.2.0.4"
-oracle_base: /u01/app/oracle          # RDBMS base
-grid_base: /u01/app/grid              # GI base (ASM/cmdsrv diag lives here)
-oracle_home: /u01/app/oracle/product/11.2.0/dbhome_1
-grid_home: /u01/app/11.2.0/grid
+oracle_sw_version: "19.31.0.0"
+oracle_base: /u01/app/oracle              # RDBMS base (both homes)
+grid_base: /u01/app/grid                  # GI base (ASM/cmdsrv diag lives here)
+oracle_home: /u01/app/oracle/product/19.0.0/dbhome_1
+oracle11_home: /u01/app/oracle/product/11.2.0/dbhome_1
+grid_home: /u01/app/19.0.0/grid
 ora_inventory: /u01/app/oraInventory
 
 # --- Users / groups (fixed GIDs so both nodes agree) ---
@@ -27,6 +40,10 @@ os_groups:
   oinstall: 5001
   dba:      5002
   oper:     5003
+  backupdba: 5004
+  dgdba:    5005
+  kmdba:    5006
+  racdba:   5009
   asmadmin: 5010
   asmdba:   5011
   asmoper:  5012
@@ -44,58 +61,53 @@ sys_password: "oracle"
 system_password: "oracle"
 dbsnmp_password: "oracle"
 
-# --- OS packages (EL7 names; i686 libs are required by 11.2 link actions) ---
-# NOTE: deliberately NOT using oracle-rdbms-server-11gR2-preinstall — it
-# predates GI-owner separation (no grid/asmadmin model) and its post-script
-# would fight the fixed-GID setup in roles/common. This list was audited
-# against ol7 latest+addons repodata (2026-10-21): fully satisfiable.
+# --- OS packages (EL9 names; 19c has NO i686 requirements) ---
+# NOTE: deliberately NOT using oracle-database-preinstall-19c — it creates
+# its own oracle user (54321) and its post-install would fight the fixed-GID
+# two-owner model in roles/common. List audited against ol9_baseos_latest +
+# ol9_appstream on the spike VM (2026-10-26): fully satisfiable except the
+# 11g-only compat libs, which 04b grafts from the OL7 repo.
 oracle_packages:
   - binutils
-  - compat-libcap1
-  - compat-libstdc++-33
-  - compat-libstdc++-33.i686
   - gcc
   - gcc-c++
   - glibc
-  - glibc.i686
   - glibc-devel
-  - glibc-devel.i686
   - ksh
   - libaio
-  - libaio.i686
   - libaio-devel
-  - libaio-devel.i686
-  - libgcc.i686
+  - libnsl
+  - librdmacm
   - libstdc++
-  - libstdc++.i686
   - libstdc++-devel
-  - libstdc++-devel.i686
-  - libXext
-  - libXext.i686
-  - libXt
-  - libXt.i686
   - libX11
+  - libXau
+  - libXi
+  - libXrender
   - libXtst
-  - libXtst.i686
   - make
+  - policycoreutils
+  - smartmontools
   - sysstat
-  - unixODBC
-  - unixODBC-devel
+  - unzip
   # tooling used by bootstrap scripts / installers / CVU
   - bc
   - bind-utils
   - dnsmasq
-  - ntp
-  - unzip
+  - nfs-utils
+  - psmisc
   - xorg-x11-utils
-  - redhat-lsb-core
+# Timekeeping on EL9 is chrony (the `ntp` daemon of EL7 no longer exists);
+# roles/common pins one explicit server (PRVF-5408, see ntp_servers below).
+time_packages:
+  - chrony
 
-# --- Kernel parameters (11.2 RAC checklist) ---
+# --- Kernel parameters (19c RAC checklist; 16 GB nodes) ---
 kernel_parameters:
   fs.aio-max-nr: "1048576"
   fs.file-max: "6815744"
-  kernel.shmall: "4194304"        # 16 GB * pagesize/4k ceiling; > 8 GB RAM hosts
-  kernel.shmmax: "8589934592"     # half of 16 GB; per-instance SGA headroom
+  kernel.shmall: "4194304"        # 16 GB * pagesize/4k ceiling
+  kernel.shmmax: "8589934592"     # half of RAM; per-instance SGA headroom
   kernel.shmmni: "4096"
   kernel.sem: "250 32000 100 128"
   net.ipv4.ip_local_port_range: "9000 65500"
@@ -128,7 +140,7 @@ resource_limits:
 # the Vagrantfile refuses to create them if two disks would share a size.
 asm_disks:
   - { label: CRS,  size_gb: 12 }
-  - { label: DATA, size_gb: 20 }
+  - { label: DATA, size_gb: 30 }
   - { label: FRA,  size_gb: 10 }
 
 # --- NTP ---

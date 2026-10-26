@@ -1,7 +1,16 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 #
-# Oracle 11.2.0.4 RAC — two nodes on VirtualBox, driven by host-side Ansible.
+# GI 19c + DB 19c + DB 11.2.0.4 — two nodes on VirtualBox, host Ansible.
+# Forked from cpyang/db11g (same build model); 19c install know-how ported
+# from oracle_dr_on_aws/tests.
+#
+# BUILD MODEL (unchanged from db11g)
+# -----------------------------------
+# Nothing installs during `vagrant up`. Vagrant boots the nodes and runs the
+# tiny bootstrap/swap scripts; every Oracle phase is an explicit
+# ansible-playbook run from the lab host. Re-attachable, re-runnable per
+# phase.
 #
 # SHARED DISK STRATEGY (validated on this host family with VBox 7.x)
 # -------------------------------------------------------------------
@@ -10,35 +19,34 @@
 #      (VBox 7 REJECTS --mtype shareable for DYNAMIC media).
 #   2. Every storageattach call uses --mtype shareable.
 #   3. The SAS controller exists before storageattach runs.
-# The previous version of this file created DYNAMIC VDIs and never attached
-# them to anything — ASM had no shared disks at all. Shared ASM disks now get
-# DISTINCT sizes (12/20/10 GB): guests map devices to ASM labels by exact
-# sector size, never by /dev/sdX letters, and unique sizes are the identity.
+# Shared ASM disks get DISTINCT sizes (12/30/10 GB): guests map devices to
+# ASM labels by exact sector size, never by /dev/sdX letters — unique sizes
+# are the identity (VBox SAS disks expose no serial).
 #
 # NETWORK NOTE
 # ------------
-# 192.168.56.0/24 and 10.10.10.0/24 are already owned by the 19c RAC lab
-# (oracle_dr_on_aws) on this host, so this lab lives on 192.168.86.0/24
-# (public, host-only) and a VBox internal network 10.90.90.0/24
-# (interconnect). Do not "align" these ranges with the other lab.
+# 192.168.56.0/24 (oracle_dr_on_aws rac labs), 192.168.86.0/24 (db11g lab)
+# and 10.10.10.0/24 are taken on this host family — this lab lives on
+# 192.168.96.0/24 (public, host-only) and VBox internal network
+# 10.96.96.0/24 (interconnect). Do not "align" these ranges.
 #
 # Vagrant applies private_network IPs only on FIRST boot — if VMs are
 # recreated over existing media, check both NICs are addressed after boot.
 
 require 'fileutils'
 
-# Set DB11G_SKIP_DISK_PREP=1 to parse the file without touching host disk
+# Set DB19C_SKIP_DISK_PREP=1 to parse the file without touching host disk
 # media (used by `vagrant validate` / lint runs).
-SKIP_DISK_PREP = ENV['DB11G_SKIP_DISK_PREP'] == '1'
+SKIP_DISK_PREP = ENV['DB19C_SKIP_DISK_PREP'] == '1'
 
 # --------------------------------------------------------------------------
 # Constants
 # --------------------------------------------------------------------------
-DOMAIN        = 'db11g.lab'
-NETWORK       = '192.168.86'   # host-only "public"
-PRIV_NETWORK  = '10.90.90'     # VBox internal network (cluster interconnect)
+DOMAIN        = 'db19c.lab'
+NETWORK       = '192.168.96'   # host-only "public"
+PRIV_NETWORK  = '10.96.96'     # VBox internal network (cluster interconnect)
 SCAN_IP       = "#{NETWORK}.100"
-INTNET_NAME   = 'db11g-priv-net'
+INTNET_NAME   = 'db19c-priv-net'
 
 VAGRANT_ROOT = File.dirname(File.expand_path(__FILE__))
 DISK_DIR     = File.join(VAGRANT_ROOT, '.vagrant', 'shared_disks')
@@ -47,32 +55,32 @@ ASM_CTRL     = 'ASM_SCSI'
 
 # Shared ASM disks — sizes MUST stay pairwise distinct (size = identity).
 SHARED_DISKS = {
-  'db11g_crs'  => 12,   # GB — OCR + voting disks (disk group CRS)
-  'db11g_data' => 20,   # GB — database files     (disk group DATA)
-  'db11g_fra'  => 10,   # GB — flash recovery area (disk group FRA)
+  'db19c_crs'  => 12,   # GB — OCR + voting disks (disk group CRS)
+  'db19c_data' => 30,   # GB — database files     (disk group DATA)
+  'db19c_fra'  => 10,   # GB — flash recovery area (disk group FRA)
 }
-SWAP_DISK_GB = 6        # node-exclusive; CVU wants swap ~= RAM (6 GB)
+SWAP_DISK_GB = 16       # node-exclusive; CVU wants swap ~= RAM (16 GB)
 
 NODES = {
-  'db11g-rac1' => {
-    fqdn: "db11g-rac1.#{DOMAIN}",
+  'db19c-rac1' => {
+    fqdn: "db19c-rac1.#{DOMAIN}",
     public_ip: "#{NETWORK}.11",
     private_ip: "#{PRIV_NETWORK}.11",
     vip: "#{NETWORK}.101",
-    memory: 6144,
-    cpus: 2,
-    grid_home: '/u01/app/11.2.0/grid',
-    oracle_home: '/u01/app/oracle/product/11.2.0/dbhome_1',
+    memory: 16384,
+    cpus: 4,
+    grid_home: '/u01/app/19.0.0/grid',
+    oracle_home: '/u01/app/oracle/product/19.0.0/dbhome_1',
   },
-  'db11g-rac2' => {
-    fqdn: "db11g-rac2.#{DOMAIN}",
+  'db19c-rac2' => {
+    fqdn: "db19c-rac2.#{DOMAIN}",
     public_ip: "#{NETWORK}.12",
     private_ip: "#{PRIV_NETWORK}.12",
     vip: "#{NETWORK}.102",
-    memory: 6144,
-    cpus: 2,
-    grid_home: '/u01/app/11.2.0/grid',
-    oracle_home: '/u01/app/oracle/product/11.2.0/dbhome_1',
+    memory: 16384,
+    cpus: 4,
+    grid_home: '/u01/app/19.0.0/grid',
+    oracle_home: '/u01/app/oracle/product/19.0.0/dbhome_1',
   },
 }
 
@@ -98,7 +106,7 @@ def create_shared_disk(name, size_gb, disk_dir)
     info = `vboxmanage showmediuminfo "#{disk_path}" 2>&1`
   end
   # VBox 7 rejects --mtype shareable for DYNAMIC media. Fail loudly instead
-  # of producing a half-attached cluster (the old disks/*.vdi were dynamic).
+  # of producing a half-attached cluster (db11g's original disks/*.vdi were).
   abort "  ERROR: #{disk_path} is DYNAMIC media — remove it (must be " \
         "unattached+empty) and let the Vagrantfile recreate it Fixed.\n" \
         "  Check: vboxmanage showmediuminfo \"#{disk_path}\"" if
@@ -129,7 +137,7 @@ end
 
 # Remove ASM_SCSI before every up/reload so storagectl --add is idempotent
 # (vb.customize re-runs on every boot, not just creation). reload does not
-# fire :up triggers, hence both. Copied from the sibling 19c lab.
+# fire :up triggers, hence both.
 def ensure_clean_scsi_ctrl(node, vm_name, ctrl)
   [:up, :reload].each do |trigger_cmd|
     node.trigger.before trigger_cmd do |t|
@@ -165,24 +173,30 @@ end
 
 # --------------------------------------------------------------------------
 Vagrant.configure('2') do |config|
-  config.vm.box              = 'oraclelinux/7'
-  config.vm.box_url          = 'https://oracle.github.io/vagrant-projects/boxes/oraclelinux/7.json'
+  # Oracle distributes its boxes from its own registry since the HashiCorp
+  # one was retired; the vagrantcloud name does not resolve, so point
+  # box_url at Oracle's metadata JSON (virtualbox entry: OL9U8 = 9.8.712,
+  # ships UEKR7 — the OL9 build 19c certification requires).
+  config.vm.box              = 'oraclelinux/9'
+  config.vm.box_url          = 'https://oracle.github.io/vagrant-projects/boxes/oraclelinux/9.json'
   config.vm.box_check_update = false
 
-  # 50 GB root disk: /u01 (GI + DB homes + extracted media) lives on it.
-  config.vm.disk :disk, size: '50GB', primary: true
+  # 60 GB root disk: /u01 (GI home + TWO DB homes 19c/11g + media) lives on it.
+  config.vm.disk :disk, size: '60GB', primary: true
 
   # The repo folder must NOT rsync GB-scale zips/VDIs into every guest.
   config.vm.synced_folder '.', '/vagrant', disabled: true
 
   # Installation media: read-only VirtualBox shared folder (no copying).
+  # staging/ holds per-file SYMLINKS to the host media library — VBox
+  # shared-folder mounts follow them; nothing is duplicated in the repo.
   config.vm.synced_folder 'staging', '/u01/staging',
     type: 'virtualbox', mount_options: %w[ro fmode=644 dmode=755 uid=0 gid=0]
 
   NODES.each do |node_name, node|
-    # primary: plain `vagrant ssh`/status targets node1 (adopted from di's
-    # WIP Vagrantfile, 2026-09). Node DEFINITION order stays rac1→rac2:
-    # serial `vagrant up` boots node1 first, which owns ASM init.
+    # primary: plain `vagrant ssh`/status targets node1. Node DEFINITION
+    # order stays rac1→rac2: serial `vagrant up` boots node1 first, which
+    # owns cluster formation.
     config.vm.define node_name, primary: (node_name == NODES.keys.first) do |cfg|
       cfg.vm.hostname = node[:fqdn]
 
@@ -203,15 +217,16 @@ Vagrant.configure('2') do |config|
           # Ports 0-2: shared ASM disks in identical order on both nodes.
           # Port 3: node-exclusive swap (mtype normal — VB7 forbids
           # shareable on dynamic media).
-          attach_disk(vb, ASM_CTRL, 0, DISK_VARS['db11g_crs'])
-          attach_disk(vb, ASM_CTRL, 1, DISK_VARS['db11g_data'])
-          attach_disk(vb, ASM_CTRL, 2, DISK_VARS['db11g_fra'])
+          attach_disk(vb, ASM_CTRL, 0, DISK_VARS['db19c_crs'])
+          attach_disk(vb, ASM_CTRL, 1, DISK_VARS['db19c_data'])
+          attach_disk(vb, ASM_CTRL, 2, DISK_VARS['db19c_fra'])
           attach_disk(vb, ASM_CTRL, 3, DISK_VARS["#{node_name}_swap"], 'normal')
         end
       end
 
-      # Minimal guest prep so host-side Ansible can run. Bootstrap needs no
-      # IPs (they come from Vagrant's network config); args are informational.
+      # Minimal guest prep so host-side Ansible can run. EL9 has no
+      # network-scripts — NetworkManager STAYS ON (db11g/EL7 turned it off);
+      # see bootstrap.sh and the NM-safe DNS handling in roles/common.
       cfg.vm.provision :shell,
         path: 'vagrant/scripts/bootstrap.sh',
         args: [node[:fqdn], node[:public_ip], node[:private_ip], node[:vip], SCAN_IP]
@@ -222,14 +237,15 @@ Vagrant.configure('2') do |config|
   end
 
   config.vm.post_up_message = <<~MSG
-    == db11g node up ==
+    == db19c node up ==
     Oracle install is driven from the HOST, not by vagrant provision:
-      cd ansible && source ../.venv-ansible/bin/activate
-      ansible-playbook playbooks/01-configure-os.yml   # OS prep, both nodes
-      ansible-playbook playbooks/02-configure-cluster.yml  # ASM disks/trust
-      ansible-playbook playbooks/03-install-grid.yml   # GI install + root.sh + DGs
-      ansible-playbook playbooks/04-install-db.yml     # RDBMS software + root.sh
-      ansible-playbook playbooks/05-create-db.yml      # dbca (optional)
+      cd ansible
+      ansible-playbook playbooks/01-configure-os.yml        # OS prep, both nodes
+      ansible-playbook playbooks/02-configure-cluster.yml   # ASM disks/trust
+      ansible-playbook playbooks/03-install-grid.yml        # GI 19.31 + root.sh + DGs
+      ansible-playbook playbooks/04-install-db.yml          # 19c DB software + root.sh
+      ansible-playbook playbooks/04b-install-db11g.yml      # 11.2.0.4 DB software
+      ansible-playbook playbooks/05-create-db.yml           # dbca 19c + register 11g
     Order matters. See README.md for details and idempotency notes.
   MSG
 end

@@ -1,0 +1,138 @@
+# ============================================================
+# Role: database11g — Oracle RDBMS 11.2.0.4 software on EL9
+#
+# Single-instance-style install PER NODE (CLUSTER_NODES empty -> local
+# image only; no propagation, no CVU node checks — the 11g home is then
+# registered with the cluster through 19c srvctl/dbca, playbook 05).
+# Media: patch 13390677 1of7+2of7 -> database/ (3of7 = 11g GI: NOT used,
+# GI here is 19c).
+#
+#   stage=check     media present
+#   stage=software  per node: pre-fixups, unzip, runInstaller, post-fixup
+#   stage=root      per node: $OH/root.sh (setuid)
+#   stage=verify    bin/oracle real + banner runs
+# ============================================================
+
+- name: Resolve stage from play vars
+  set_fact:
+    db11_phase: "{{ db11_stage | default('check') }}"
+
+# ------------------------------------------------------------------ check
+- name: Confirm 11g media is visible on the staging mount
+  stat:
+    path: "{{ oracle_stage_dir }}/{{ item }}"
+  loop: "{{ oracle11_database_zips }}"
+  register: db11_media
+  failed_when: not db11_media.stat.exists
+  when: db11_phase == 'check'
+
+# ------------------------------------------------------------------ software
+- name: EL9 link fixups (pre)
+  script:
+    cmd: "{{ role_path }}/../../scripts/ol9_11g_fixup.sh pre"
+  register: fixup_pre
+  failed_when: fixup_pre.rc != 0
+
+- name: Show fixup-pre output
+  debug: msg="{{ fixup_pre.stdout_lines }}"
+
+- name: Detect installed 11g home (bin/oracle > 1MB)
+  stat:
+    path: "{{ oracle11_home }}/bin/oracle"
+  register: db11_bin
+  when: db11_phase == 'software'
+
+- name: Unarchive 11g media (two parts overlay into database/)
+  unarchive:
+    src: "{{ oracle_stage_dir }}/{{ item }}"
+    dest: "{{ oracle_media_dir }}"
+    remote_src: true
+    owner: oracle
+    group: "{{ oracle_installer_group }}"
+  become_user: oracle
+  loop: "{{ oracle11_database_zips }}"
+  when:
+    - db11_phase == 'software'
+    - not (db11_bin.stat.exists | default(false)) or db11_bin.stat.size | default(0) < 1048576
+
+- name: Render db11_install.rsp from the MEDIA template (ground truth)
+  # The 11.2 rsp XSD is a STRICT ORDERED SEQUENCE — a missing/reordered key
+  # dies INS-10105 'not complete'. The spike hand-rolled one and proved the
+  # media's own response/db_install.rsp is the only safe base.
+  shell: |
+    cp {{ oracle_media_dir }}/database/response/db_install.rsp {{ grid_install_tmp }}/db11_install.rsp
+    setrsp() { sed -i -E "s|^[#[:space:]]*$1[[:space:]]*=.*|$1=$2|" {{ grid_install_tmp }}/db11_install.rsp; }
+    setrsp ORACLE_HOSTNAME {{ short_name }}
+    setrsp UNIX_GROUP_NAME {{ oracle_installer_group }}
+    setrsp INVENTORY_LOCATION {{ ora_inventory }}
+    setrsp ORACLE_HOME {{ oracle11_home }}
+    setrsp ORACLE_BASE {{ oracle_base }}
+    setrsp oracle.install.option INSTALL_DB_SWONLY
+    setrsp oracle.install.db.InstallEdition EE
+    setrsp oracle.install.db.DBA_GROUP {{ oracle_db_group }}
+    setrsp oracle.install.db.OPER_GROUP oper
+    setrsp DECLINE_SECURITY_UPDATES true
+    for k in ORACLE_HOSTNAME UNIX_GROUP_NAME INVENTORY_LOCATION ORACLE_HOME ORACLE_BASE oracle.install.option oracle.install.db.InstallEdition oracle.install.db.DBA_GROUP DECLINE_SECURITY_UPDATES; do
+      grep -qE "^$k=" {{ grid_install_tmp }}/db11_install.rsp || { echo "rsp-MISSING-$k"; exit 1; }
+    done
+    chmod 600 {{ grid_install_tmp }}/db11_install.rsp
+  become_user: oracle
+  when:
+    - db11_phase == 'software'
+    - not (db11_bin.stat.exists | default(false)) or db11_bin.stat.size | default(0) < 1048576
+
+- name: Install 11g software (per node, local home; -waitforcompletion keeps it synchronous)
+  command: >-
+    {{ oracle_media_dir }}/database/runInstaller -silent
+    -responseFile {{ grid_install_tmp }}/db11_install.rsp
+    -ignorePrereq -waitforcompletion
+  become_user: oracle
+  environment:
+    TMPDIR: "{{ grid_install_tmp }}"
+    LANG: en_US.UTF-8
+  register: db11_install
+  failed_when: false        # the Make phase aborts on EL9 by design; fixup judges
+  timeout: 5400
+  when:
+    - db11_phase == 'software'
+    - not (db11_bin.stat.exists | default(false)) or db11_bin.stat.size | default(0) < 1048576
+
+- name: Show installer tail
+  debug: msg="{{ (db11_install.stderr_lines | default([]))[-6:] }}"
+  when:
+    - db11_phase == 'software'
+    - db11_install is not skipped
+
+- name: EL9 relink fixups (post)
+  script:
+    cmd: "{{ role_path }}/../../scripts/ol9_11g_fixup.sh post {{ oracle11_home }}"
+  become_user: oracle
+  register: fixup_post
+  failed_when: fixup_post.rc != 0
+  when: db11_phase == 'software'
+
+- name: Show fixup-post output
+  debug: msg="{{ fixup_post.stdout_lines }}"
+  when: db11_phase == 'software'
+
+# ------------------------------------------------------------------ root.sh
+- name: (root phase) run root.sh unless oracle binary already setuid
+  shell: |
+    stat -c '%A' {{ oracle11_home }}/bin/oracle | grep -q '^.-ws' || \
+      ( {{ oracle11_home }}/root.sh >/tmp/db11root.out 2>&1; \
+        stat -c '%A' {{ oracle11_home }}/bin/oracle | grep '^.-ws' )
+  changed_when: true
+  when: db11_phase == 'root'
+
+# ------------------------------------------------------------------ verify
+- name: Verify 11g home runs on EL9
+  shell: |
+    test $(stat -c %s {{ oracle11_home }}/bin/oracle) -gt 1000000
+    {{ oracle11_home }}/bin/oracle -v | grep -qi 'Oracle Database 11g'
+    {{ oracle11_home }}/bin/sqlplus -V | grep -q 'SQL*Plus'
+  environment:
+    ORACLE_HOME: "{{ oracle11_home }}"
+    LD_LIBRARY_PATH: "{{ oracle11_home }}/lib"
+  become_user: oracle
+  changed_when: false
+  when: db11_phase == 'verify'

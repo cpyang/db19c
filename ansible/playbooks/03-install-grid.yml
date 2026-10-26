@@ -1,13 +1,13 @@
 # ============================================================
-# Playbook 03 — Oracle Grid Infrastructure 11.2.0.4 install
-# Phases are SEPARATE plays because 11.2 propagates from node1 and
-# root.sh order is a hard requirement (node1 forms the cluster, node2
-# joins it — never both at once).
+# Playbook 03 — Grid Infrastructure 19.3 + RU 19.31 install
+# Phases are SEPARATE plays: gridSetup runs on node1 only (it stages
+# the peers), and root.sh order node1 -> node2 is a hard requirement.
 # Run: ansible-playbook playbooks/03-install-grid.yml
-# Idempotent: re-running skips completed phases via the stage guards.
+# Idempotent: re-running skips completed phases via stage guards
+# (gridSetup.sh present, /etc/oracle/olr.loc, CRS-4537, stat res -t).
 # ============================================================
 
-- name: GI preflight (media, ASM disks, NIC roles)
+- name: GI preflight (media, ASM symlinks, NIC roles)
   hosts: rac
   gather_facts: true
   become: true
@@ -16,8 +16,8 @@
   roles:
     - grid
 
-- name: GI software install (node1; propagates to node2)
-  hosts: rac[0]
+- name: GI software + cluster config (node1; gridSetup -applyRU, ~1 h)
+  hosts: rac
   gather_facts: true
   become: true
   vars:
@@ -25,7 +25,7 @@
   roles:
     - grid
 
-- name: root.sh — node1 (starts OCR/Vote + CRS; ~10 min)
+- name: root.sh — node1 (forms the cluster)
   hosts: rac[0]
   gather_facts: false
   become: true
@@ -34,7 +34,7 @@
   roles:
     - grid
 
-- name: root.sh — node2 (joins existing cluster via ConfigNode)
+- name: root.sh — node2 (joins via ConfigNode — never both at once)
   hosts: rac[1]
   gather_facts: false
   become: true

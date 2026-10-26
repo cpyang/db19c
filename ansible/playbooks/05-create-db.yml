@@ -1,46 +1,136 @@
 # ============================================================
-# Playbook 05 — create the RAC database (dbca, silent)
-# Phase 1: single-instance create on node1 (the path that reliably gets
-#          past CVU in RAC labs), Phase 2: addInstance for node2,
-#          Phase 3: FRA pointer + start + verify 2 OPEN instances.
-# Run: ansible-playbook playbooks/05-create-db.yml
+# Playbook 05 — create BOTH databases on GI 19c
+#   A) db19c — 19c RAC CDB (node1 instance at create, node2 via addInstance)
+#   B) db11  — 11.2.0.4 single instance, registered through 19c srvctl
 #
-# NOTE before first real run: confirm the exact dbca -createDatabase /
-# -addInstance flag names on the VM with
-#   $ORACLE_HOME/bin/dbca -silent -createDatabase -help
-#   $ORACLE_HOME/bin/dbca -silent -addInstance   -help
-# (11.2.0.4 flags differ from 19c; this file follows the 11.2 grammar.)
+# 19c grammar = oracle_dr_on_aws/tests lab's proven path (create on node1,
+# dbca -addInstance for node2, ORA_DISABLED_CVU_CHECKS=SCAN for the base
+# TaskNameService phantom — the DNS itself is verified in playbook 01).
+#
+# BEFORE first real run, sanity-check the 11g dbca grammar on the VM
+# (db11g README lesson — 11.2 dbca is picky about -sid/-nodeList
+# interaction and this combination [11g dbca + 19c GI] is the lab's
+# one non-standard pairing):
+#   vagrant ssh db19c-rac1 -c "sudo -u oracle ORACLE_HOME=/u01/app/oracle/product/11.2.0/dbhome_1 /u01/app/oracle/product/11.2.0/dbhome_1/bin/dbca -help"
+#   (spike note: 11g dbca rejects '-createDatabase -help' — plain -help
+#    prints the full -createDatabase grammar)
+#
+# Run: ansible-playbook playbooks/05-create-db.yml
+#      ansible-playbook playbooks/05-create-db.yml --tags db19   (or db11)
 # ============================================================
 
-- name: Create RAC database {{ db_name }}
+# -------------------------------------------------------------- A) 19c CDB
+- name: Create RAC CDB db19c (19.31)
   hosts: rac[0]
   gather_facts: false
   become: true
+  tags: [db19]
   vars:
     db_home_env:
       ORACLE_HOME: "{{ oracle_home }}"
-      ORACLE_SID: "{{ db_sid_prefix }}1"
       PATH: "{{ oracle_home }}/bin:/usr/bin:/bin"
+      HOME: /home/oracle
+      CV_ASSUME_DISTID: OEL7.8
+      ORA_DISABLED_CVU_CHECKS: SCAN
   tasks:
-    - name: "Check whether database is already registered with GI"
+    - name: Check whether db19c is already registered with GI
       command: "{{ grid_home }}/bin/srvctl config database -d {{ db_name }}"
       become_user: grid
-      register: db_registered
+      register: db19_registered
       failed_when: false
       changed_when: false
 
-    - name: Resolve addInstance host name (node2 FQDN)
-      set_fact:
-        node2_fqdn: "{{ groups['rac'][1] }}"
-
-    # -recoveryGroupName is intentionally NOT passed: ASM-managed FRA is
-    # pointed at +FRA via spfile below (DBT-6604-style sizing traps).
-    - name: dbca createDatabase (single-instance first; 20-40 min)
+    - name: dbca create the CDB on node1 (30-60 min)
       command: >-
         {{ oracle_home }}/bin/dbca -silent -createDatabase
         -templateName {{ dbca_template }}
         -gdbName {{ db_name }}
-        -sid {{ db_sid_prefix }}
+        -sid {{ db_sid_prefix }}1
+        -sysPassword {{ sys_password }}
+        -systemPassword {{ system_password }}
+        -emConfiguration NONE
+        -storageType ASM
+        -diskGroupName {{ asm_diskgroup_data }}
+        -recoveryGroupName {{ asm_diskgroup_fra }}
+        -characterSet {{ db_charset }}
+        -nationalCharacterSet {{ db_ncharset }}
+        -memoryPercentage {{ db_memory_percentage }}
+        -databaseType MULTIPURPOSE
+        -sampleSchema false
+        -createAsContainerDatabase true
+        -numberOfPDBs 1
+        -pdbName {{ pdb_name }}
+        -pdbAdminPassword {{ system_password }}
+        -initParams db_unique_name={{ db_unique_name }}
+      become_user: oracle
+      environment: "{{ db_home_env }}"
+      register: dbca19
+      timeout: 7200
+      changed_when: true
+      when: db19_registered.rc != 0
+
+    - name: Add instance {{ db_sid_prefix }}2 on node2
+      shell: |
+        {{ grid_home }}/bin/srvctl status database -d {{ db_name }} \
+          | grep -q "{{ db_sid_prefix }}2" && echo ALREADY && exit 0
+        export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
+        export CV_ASSUME_DISTID=OEL7.8 ORA_DISABLED_CVU_CHECKS=SCAN
+        export ORACLE_SID={{ db_sid_prefix }}1
+        {{ oracle_home }}/bin/dbca -silent -addInstance \
+          -gdbName {{ db_name }} \
+          -nodeName {{ groups['rac'][1] }} \
+          -instanceName {{ db_sid_prefix }}2 \
+          -sysDBAUserName sys -sysDBAPassword {{ sys_password }}
+      become_user: oracle
+      register: dbca19_add
+      timeout: 3600
+      changed_when: "'ALREADY' not in dbca19_add.stdout"
+
+    - name: Start db19c, both instances
+      shell: |
+        {{ grid_home }}/bin/srvctl start database -d {{ db_name }} 2>&1 \
+          | grep -v PRCC-1014 || true
+        {{ grid_home }}/bin/srvctl status database -d {{ db_name }}
+      become_user: grid
+      register: db19_status
+      changed_when: true
+
+    - name: Assert db19c has 2 running instances
+      assert:
+        that: (db19_status.stdout | regex_findall('is running')) | length == 2
+        fail_msg: "db19c instances:\n{{ db19_status.stdout }}"
+      changed_when: false
+
+# -------------------------------------------------------------- B) 11g single instance
+- name: Create 11.2.0.4 database db11 (single instance under GI 19c)
+  hosts: rac[0]
+  gather_facts: false
+  become: true
+  tags: [db11]
+  vars:
+    db11_env:
+      ORACLE_HOME: "{{ oracle11_home }}"
+      PATH: "{{ oracle11_home }}/bin:/usr/bin:/bin"
+      HOME: /home/oracle
+  tasks:
+    - name: Check whether db11 is already registered
+      command: "{{ grid_home }}/bin/srvctl config database -d {{ db11_name }}"
+      become_user: grid
+      register: db11_registered
+      failed_when: false
+      changed_when: false
+
+    # 11g dbca detects the running cluster via /etc/oracle/olr.loc and
+    # would try to create/register a RAC-style resource through 11.2
+    # binaries that no longer own the stack here — cluster_database=false
+    # in -initParams keeps dbca creating a plain single-instance DB.
+    # Cluster registration then happens once, explicitly, from 19c srvctl.
+    - name: dbca create db11 from the 11g home (30-60 min)
+      command: >-
+        {{ oracle11_home }}/bin/dbca -silent -createDatabase
+        -templateName {{ oracle11_home }}/assistants/dbca/templates/General_Purpose.dbc
+        -gdbName {{ db11_name }}
+        -sid {{ db11_sid }}
         -sysPassword {{ sys_password }}
         -systemPassword {{ system_password }}
         -dbsnmpPassword {{ dbsnmp_password }}
@@ -49,93 +139,76 @@
         -diskGroupName {{ asm_diskgroup_data }}
         -characterSet {{ db_charset }}
         -nationalCharacterSet {{ db_ncharset }}
-        -memoryPercentage {{ db_memory_percentage }}
-        -databaseType OLTP
+        -memoryPercentage 20
         -sampleSchema false
-        -nodeList {{ groups['rac'] | map('split', '.') | map('first') | join(',') }}
+        -initParams cluster_database=false
       become_user: oracle
-      environment: "{{ db_home_env }}"
-      register: dbca_create
+      environment: "{{ db11_env }}"
+      register: dbca11
       timeout: 7200
       changed_when: true
-      when: db_registered.rc != 0
+      failed_when:
+        - dbca11.rc != 0
+        - db11_registered.rc != 0     # tolerate 'already there' re-runs
 
-    - name: dbca addInstance for node2
-      # OBSOLETE: -createDatabase now passes -nodeList (both nodes), so the
-      # create itself produces rac1+rac2 in one shot. -dbName here was also
-      # invalid on 11.2 dbca. Kept force-runnable for legacy mid-states only.
-      command: >-
-        {{ oracle_home }}/bin/dbca -silent -addInstance
-        -dbName {{ db_name }}
-        -instanceName {{ db_sid_prefix }}2
-        -hostName {{ node2_fqdn }}
-        -sysDBAUserName sys
-        -sysDBAPassword {{ sys_password }}
-        -enableThread true
-      become_user: oracle
-      environment: "{{ db_home_env }}"
-      register: dbca_add
-      timeout: 3600
-      changed_when: true
-      when: db_registered.rc != 0
-      failed_when: dbca_add.rc != 0
-      tags: [never, legacy-addnode]
-
-    - name: Ensure database is up (any state at play start)
-      command: "{{ grid_home }}/bin/srvctl start database -d {{ db_name }}"
-      become_user: oracle
-      register: db_start
-      # PRCC-1014 "already running" lands on STDOUT (rc=1), not stderr.
-      failed_when: >-
-        db_start.rc != 0
-        and 'already running' not in ((db_start.stderr | default('')) ~ (db_start.stdout | default('')))
-      changed_when: true
-
-    - name: Point db_recovery_file_dest at +FRA (spfile; dbca pre-set size)
-      # Dynamic ALTER of the dest on a running 11.2 RAC instance dies with
-      # ORA-19802 (kfs won't mount a fresh DG live); spfile + restart is the
-      # canonical path. dbca already sets db_recovery_file_dest_size.
-      shell: |-
-        {{ oracle_home }}/bin/sqlplus -S / as sysdba <<'SQL'
-        ALTER SYSTEM SET db_recovery_file_dest='+{{ asm_diskgroup_fra }}' SCOPE=SPFILE SID='*';
-        EXIT
-        SQL
-      become_user: oracle
-      environment: "{{ db_home_env }}"
-      register: fra_set
-      changed_when: true
-      failed_when: fra_set.rc != 0 or 'ORA-' in fra_set.stdout
-      tags: [fra]
-
-    - name: Restart database to apply FRA dest
+    - name: Locate the ASM spfile dbca left in +DATA
+      # spfile.264.1234567890 — the exact name is generated; discover it
+      # instead of baking a placeholder. (asmcmd 'find', pattern-limited.)
       shell: |
-        {{ grid_home }}/bin/srvctl stop database -d {{ db_name }} -o immediate
-        sleep 5
-        {{ grid_home }}/bin/srvctl start database -d {{ db_name }}
-      become_user: oracle
-      environment: "{{ db_home_env }}"
-      changed_when: true
-      tags: [fra]
-
-    - name: Verify both instances OPEN
-      shell: |-
-        {{ oracle_home }}/bin/sqlplus -S / as sysdba <<'SQL'
-        SET HEADING OFF FEEDBACK OFF PAGESIZE 0
-        SELECT COUNT(*) FROM gv$instance WHERE status = 'OPEN';
-        EXIT
-        SQL
-      become_user: oracle
-      environment: "{{ db_home_env }}"
-      register: inst_count
-      retries: 20
-      delay: 30
-      until: (inst_count.stdout | trim | int) == (groups['rac'] | length)
+        export ORACLE_HOME={{ grid_home }}
+        {{ grid_home }}/bin/asmcmd ls {{ asm_diskgroup_data }}/{{ db11_name | upper }}/PARAMETERFILE/ 2>/dev/null | grep -i spfile | head -1
+      become_user: grid
+      register: sp11
       changed_when: false
+      failed_when: false
+
+    - name: Register db11 with GI 19c (if not registered yet)
+      shell: |
+        {{ grid_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 && exit 0
+        SP=""
+        {% if sp11.stdout | trim %}
+        SP="-p +{{ asm_diskgroup_data }}/{{ db11_name | upper }}/PARAMETERFILE/{{ sp11.stdout | trim }}"
+        {% endif %}
+        {{ grid_home }}/bin/srvctl add database -d {{ db11_name }} \
+          -o {{ oracle11_home }} -i {{ db11_sid }} -n {{ db11_name }} \
+          -r SINGLE -a {{ asm_diskgroup_data }} $SP
+      become_user: grid
+      register: db11_add
+      changed_when: db11_add.rc == 0
+
+    - name: Normalize db11 to a single instance
+      # -initParams cluster_database=false (flag verified present in this
+      # home's own dbca -help) keeps dbca standalone; but 11.2 dbca under a
+      # live cluster may still create instances for olsnodes' full list
+      # (srvctl in an 11g DB home dispatches to the active CRS home). Remove
+      # any beyond node1 so the DB is genuinely single-instance.
+      shell: |
+        # srvctl status lines: "Instance <ins> is running on node <n>"
+        {{ grid_home }}/bin/srvctl status database -d {{ db11_name }} \
+          | awk '$NF != "{{ db11_node }}" {print $2}' \
+          | while read -r ins; do
+              {{ grid_home }}/bin/srvctl stop instance -d {{ db11_name }} -i $ins || true
+              {{ grid_home }}/bin/srvctl remove instance -d {{ db11_name }} -i $ins || true
+            done
+        true
+      become_user: grid
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure db11 up
+      shell: |
+        {{ grid_home }}/bin/srvctl start database -d {{ db11_name }} 2>&1 \
+          | grep -v PRCC-1014 || true
+        {{ grid_home }}/bin/srvctl status database -d {{ db11_name }}
+      become_user: grid
+      register: db11_status
+      changed_when: true
+      failed_when: "'is not running' in db11_status.stdout"
 
     - name: Result
       debug:
         msg: >-
-          {{ db_name }}: {{ inst_count.stdout | trim }} of
-          {{ groups['rac'] | length }} instances OPEN.
-          Connect: sqlplus system/{{ system_password }}@{{ db_name }}_SCAN
-          (from {{ inventory_hostname }}).
+          db19c: RAC CDB ({{ db_sid_prefix }}1+{{ db_sid_prefix }}2, PDB {{ pdb_name }}).
+          db11: 11.2.0.4 single instance on {{ db11_node }}
+          {{ '— registered' if db11_add.rc == 0 else '— already registered' }}.
+          11g env: . /home/oracle/db11g.env ; connect via {{ scan_name }}:{{ scan_port }}.

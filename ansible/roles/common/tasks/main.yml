@@ -1,7 +1,12 @@
 # ============================================================
-# Role: common — OS preparation for Oracle 11.2.0.4 RAC on EL7
-# Everything the old bootstrap.sh tried (badly, for EL6) to do, plus the
-# installer prerequisites 11.2 CVU actually checks.
+# Role: common — OS preparation for GI 19c + DB 19c/11g on EL9
+# Ported from db11g's EL7 role. EL9 deltas (learned from the
+# oracle_dr_on_aws/tests OL8 lab or this repo's own spike):
+#   * NetworkManager STAYS ON (no network-scripts in EL9) — DNS is set on
+#     the NM connections, not by writing /etc/resolv.conf (NM owns it).
+#   * chrony replaces ntpd.
+#   * grid user owns /u01/app/19.0.0; GI SID is +ASM<n>.
+# Everything the 11.2/19c CVU actually checks is kept from the EL7 role.
 # ============================================================
 
 - name: Require per-host network vars (public_ip/private_ip/vip)
@@ -13,12 +18,11 @@
     fail_msg: "inventory host vars public_ip/private_ip/vip are mandatory (see inventory/hosts)"
 
 # ---------------------------------------------------------------- packages
-# Install FIRST: later tasks start services (dnsmasq, ntpd) whose units
-# only exist once these land — service-before-package order bit us live
-# on di 2026-10-21 ("Could not find the requested service dnsmasq").
+# Install FIRST: later tasks start services (dnsmasq, chronyd) whose units
+# only exist once these land (db11g di-2026-10-21 lesson).
 - name: Install Oracle prerequisite packages
   package:
-    name: "{{ oracle_packages }}"
+    name: "{{ oracle_packages + time_packages }}"
     state: present
 
 # ---------------------------------------------------------------- network/identity
@@ -34,8 +38,15 @@
     group: root
     mode: '0644'
 
-- name: Resolve NIC roles by address
-  include_tasks: resolve-interfaces.yml
+- name: "NSS: drop myhostname from the hosts lookup order"
+  # nss_myhostname answers our own hostname with EVERY local address,
+  # IPv6 link-local first; root.sh's ConfigNode then resolves the node to
+  # fe80:: and VIP allocation dies PRKC-1168 (tests lab, 2026-10-15).
+  # /etc/hosts above is complete, so plain files+dns is correct.
+  replace:
+    path: /etc/nsswitch.conf
+    regexp: '^(hosts:\s*\S*)\s+myhostname'
+    replace: '\1'
 
 - name: Stop/disable firewalld
   service:
@@ -44,25 +55,15 @@
     enabled: no
   ignore_errors: true   # disabled at bootstrap; belt and braces
 
-- name: Keep NetworkManager off (network-scripts own ifcfg-*)
-  service:
-    name: NetworkManager
-    state: stopped
-    enabled: no
-  ignore_errors: true   # oraclelinux/7 box ships NO NetworkManager at all;
-                        # service module fails "could not find" -> not a problem
+- name: Resolve NIC roles by address
+  include_tasks: resolve-interfaces.yml
 
-# DHCP on eth0 (NAT) would rewrite /etc/resolv.conf and drop the scan entry.
-- name: Disable PEERDNS on the NAT interface
-  lineinfile:
-    path: /etc/sysconfig/network-scripts/ifcfg-eth0
-    regexp: '^PEERDNS='
-    line: 'PEERDNS=no'
-    insertafter: '^BOOTPROTO='
-  when: "'eth0' in ansible_facts"
-  register: peerdns
-  failed_when: false
-
+# ---------------------------------------------------------------- DNS (NM-native)
+# dnsmasq serves the zone (SCAN + names) from each node; resolution must
+# point AT the node's own host-only address (CVU's DNS channel ignores
+# loopback-only entries — tests §1e) with the peer as secondary. The NAT
+# interface's DHCP DNS (10.0.2.3) must NOT win the merged resolver, hence
+# ignore-auto-dns on it. EL9 has no PEERDNS/ifcfg to lean on.
 - name: Configure local DNS (dnsmasq answers the scan/vip names)
   template:
     src: dnsmasq.conf.j2
@@ -78,16 +79,59 @@
     state: started
     enabled: yes
 
-- name: Configure resolver
-  template:
-    src: resolv.conf.j2
-    dest: /etc/resolv.conf
-    owner: root
-    group: root
-    mode: '0644'
+- name: Find NM connection per NIC
+  shell: nmcli -g NAME,GENERAL.DEVICES device status | awk '$2=="{{ item }}" {print $1; exit}'
+  loop: [ "{{ pub_iface }}", "{{ nat_iface | default('eth0') }}" ]
+  register: nm_con_names
+  changed_when: false
+
+- name: Point resolver at dnsmasq; ignore NAT DNS
+  # 'nmcli con mod' is offline (no link flap); the reload in the next task
+  # applies it.
+  vars:
+    peer_ips: "{{ groups['rac'] | reject('equalto', inventory_hostname) | map('extract', hostvars, 'public_ip') | list }}"
+  block:
+    - name: Set static DNS on the host-only connection
+      command: >-
+        nmcli con mod "{{ nm_con_names.results[0].stdout }}"
+        ipv4.dns "{{ ([public_ip] + peer_ips) | join(',') }}"
+        ipv4.dns-search "{{ domain_name }}"
+        ipv4.ignore-auto-dns yes
+    - name: Disable DHCP DNS on the NAT connection (keep its default route)
+      command: nmcli con mod "{{ nm_con_names.results[1].stdout }}" ipv4.ignore-auto-dns yes
+      when: nm_con_names.results[1].stdout | default('') | length > 0
+
+- name: Apply connection changes (this node's ssh may blip once)
+  shell: nohup sh -c 'sleep 2; nmcli general reload 2>/dev/null || nmcli con up "{{ nm_con_names.results[0].stdout }}"' >/tmp/nm-reload.log 2>&1 &
+  args: { executable: /bin/bash }
+  changed_when: true
+
+- name: Wait for the node to come back
+  wait_for:
+    host: "{{ public_ip }}"
+    port: 22
+    state: started
+    delay: 5
+    timeout: 120
+
+- name: Assert the resolver now points at our dnsmasq
+  shell: grep -q "{{ public_ip }}" /etc/resolv.conf && grep -q nameserver /etc/resolv.conf
+  register: resolv_check
+  retries: 20
+  delay: 5
+  until: resolv_check.rc == 0
+  changed_when: false
+
+- name: SCAN resolves via DNS (not just hosts file)
+  shell: nslookup {{ scan_name }} 127.0.0.1 | grep -q "{{ scan_ip }}"
+  register: scan_check
+  retries: 10
+  delay: 5
+  until: scan_check.rc == 0
+  changed_when: false
 
 # ---------------------------------------------------------------- security/os
-- name: SELinux status (bootstrap already set disabled; verify, no collection needed)
+- name: SELinux status (bootstrap already set disabled; verify)
   command: getenforce
   register: getenforce_out
   changed_when: false
@@ -98,9 +142,6 @@
     regexp: '^SELINUX='
     line: 'SELINUX=disabled'
 
-# If the box booted enforcing, runtime is still enforcing until a reboot —
-# 11.2 installers misbehave under Enforcing, so reboot once instead of
-# silently proceeding.
 - name: Reboot once if currently enforcing
   reboot:
     reboot_timeout: 420
@@ -122,11 +163,17 @@
     groups:
       - "{{ oracle_db_group }}"
       - "{{ oracle_asm_dba_group }}"
+      - "{{ oracle_asm_group }}"   # OS SYSASM for dbca against +ASM (db11g
+                                  # playbook-05 lesson: incomplete SYSASM auth
+                                  # dies ORA-01017/01031 mid-create)
+      - backupdba
+      - dgdba
+      - kmdba
+      - racdba
     home: /home/oracle
     shell: /bin/bash
-    # no password_lock: no — a fresh passwordless account has shadow '!'
-    # and usermod refuses to "unlock" it to empty (di 2026-10-21). Key-auth
-    # + NOPASSWD sudo need no password state at all.
+    # password_lock left alone: a fresh passwordless account has shadow '!'
+    # and usermod refuses to unlock it to empty (db11g di-2026-10-21).
     append: true
 
 - name: Create grid user (GI owner — must NOT be in dba)
@@ -156,18 +203,22 @@
     path: "{{ item.path }}"
     owner: "{{ item.owner | default('root') }}"
     group: "{{ item.group | default(oracle_installer_group) }}"
-    mode: "{{ item.mode | default('0755') }}"
+    mode: "{{ item.mode | default('0775') }}"
     state: directory
   loop:
-    - { path: /u01, mode: '0755' }
-    - { path: /u01/app, owner: oracle, mode: '0775' }
-    - { path: "{{ oracle_base }}", owner: oracle, mode: '0775' }
-    - { path: /u01/app/grid, owner: grid, mode: '0775' }
-    - { path: /u01/app/11.2.0, owner: grid, mode: '0775' }
+    - { path: /u01, owner: root, mode: '0755' }
+    - { path: /u01/app, owner: oracle }
+    - { path: "{{ oracle_base }}", owner: oracle }
+    - { path: "{{ oracle_base }}/admin", owner: oracle }
+    - { path: /u01/app/grid, owner: grid }
+    - { path: /u01/app/19.0.0, owner: grid }
+    - { path: /u01/app/oracle/product/19.0.0, owner: oracle }
+    - { path: /u01/app/oracle/product/11.2.0, owner: oracle }
     # /u01/staging is NOT managed here: it is the vboxsf mountpoint Vagrant
-    # creates at boot — any setattr (chown/chmod) on it fails (ro mount).
-    - { path: /u01/media, owner: grid, mode: '0775' }
-    - { path: /u01/tmp, mode: '1777' }             # installer scratch off /tmp
+    # creates at boot — any setattr on it fails (ro mount).
+    - { path: /u01/media, owner: oracle }
+    - { path: /u01/patches, owner: grid }
+    - { path: "{{ grid_install_tmp }}", mode: '1777' }   # installer scratch off /tmp
   loop_control:
     label: "{{ item.path }}"
 
@@ -181,11 +232,8 @@
   notify: apply sysctl
 
 - name: Mirror sysctl settings into /etc/sysctl.conf (CVU reads ONLY this file)
-  # 11.2 CVU exectask greps /etc/sysctl.conf for 'Configured value';
-  # conf.d-only installs fail 'nodeadd'-style prechecks with
-  # 'failed (ignorable) Configured value unknown' — and runInstaller's
-  # internal nodeadd gate turns that into the misleading INS-35354
-  # 'not part of a valid cluster' (di 2026-10-24, end of the trail).
+  # CVU exectask greps /etc/sysctl.conf for 'Configured value'; conf.d-only
+  # installs fail kernel-parameter prechecks (db11g di-2026-10-24 trail).
   template:
     src: sysctl.j2
     dest: /etc/sysctl.conf
@@ -224,10 +272,10 @@
     state: started
 
 # ---------------------------------------------------------------- ssh trust
-# The 11.2.0.4 installer's built-in Java ssh CANNOT read modern OpenSSH
-# (ed25519 / new-format RSA) keys — keys are generated as classic PEM.
-# (Same failure mode as the 19c lab: gridSetup log "Failed to add identity
-# file id_rsa. Reason: invalid privatekey" while native ssh looks fine.)
+# The installers' built-in Java ssh CANNOT read modern OpenSSH (ed25519 /
+# new-format RSA) private keys — classic PEM, or it fails "invalid
+# privatekey" while native ssh looks fine (both sibling labs' hardest
+# lesson). Keys for oracle AND grid, every hop incl. self.
 - name: Passwordless ssh trust for oracle and grid (all nodes, incl. self)
   vars:
     ssh_users: [oracle, grid]
@@ -260,7 +308,7 @@
     - name: Publish local key material to hostvars
       set_fact:
         # dict(zip(...)) is Jinja-native; items2 proved unavailable in the
-        # 2.16/Jinja combo on di (2026-10-21: "Could not load 'items2'")
+        # controller/Jinja combo db11g uses (di 2026-10-21).
         cluster_pubs: >-
           {{ dict(ssh_users | zip(local_pubs.results
              | map(attribute='content') | map('b64decode') | map('trim') | list)) }}
@@ -299,23 +347,23 @@
       loop: "{{ ssh_users }}"
 
 # ---------------------------------------------------------------- time sync
-- name: NTP configuration (both nodes sync the same external pool)
+- name: Chrony configuration (both nodes sync the same explicit server)
   template:
-    src: ntp.conf.j2
-    dest: /etc/ntp.conf
+    src: chrony.conf.j2
+    dest: /etc/chrony.conf
     owner: root
     group: root
     mode: '0644'
-  notify: restart ntpd
+  notify: restart chronyd
 
-- name: NTP enabled and running
+- name: Chrony enabled and running
   service:
-    name: ntpd
+    name: chronyd
     state: started
     enabled: yes
 
 # ---------------------------------------------------------------- profiles
-- name: Shell profile (oracle → DB home)
+- name: Shell profile (oracle -> 19c home)
   template:
     src: bash_profile.j2
     dest: /home/oracle/.bash_profile
@@ -327,7 +375,15 @@
     profile_home: "{{ oracle_home }}"
     profile_sid: "{{ db_sid_prefix }}{{ node_num }}"
 
-- name: Shell profile (grid → GI home)
+- name: 11g home env switcher (oracle)
+  template:
+    src: db11g.env.j2
+    dest: /home/oracle/db11g.env
+    owner: oracle
+    group: "{{ oracle_installer_group }}"
+    mode: '0644'
+
+- name: Shell profile (grid -> GI home)
   template:
     src: bash_profile.j2
     dest: /home/grid/.bash_profile
@@ -342,10 +398,9 @@
 # ---------------------------------------------------------------- login PATH
 - name: GI bin in the PAM default PATH (/etc/environment)
   # ssh non-interactive `bash -c` sources NEITHER .bash_profile NOR .bashrc,
-  # yet OUI's OIP layer probes remote nodes with bare `olsnodes` — a missing
-  # PATH entry yields "S_NO_HOST_CLUSTER_INFO" and the fatal INS-35354
-  # "not part of a valid cluster" no matter how healthy the stack is
-  # (di 2026-10-24, the SEVENTH and terminal root cause of that error).
+  # yet OUI's probes run bare `olsnodes` remotely — missing PATH yields
+  # "S_NO_HOST_CLUSTER_INFO"/INS-35354 no matter how healthy the stack is
+  # (db11g di-2026-10-24, the SEVENTH root cause of that error).
   lineinfile:
     path: /etc/environment
     regexp: "^PATH="
