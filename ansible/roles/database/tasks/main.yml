@@ -142,6 +142,12 @@
     # resolve the whole family at archive-scan time.
     ar rcs {{ oracle_home }}/lib/libstatshim.a {{ grid_install_tmp }}/statshim.o
     grep -q statshim {{ oracle_home }}/lib/sysliblist || echo -n ' -lstatshim' >> {{ oracle_home }}/lib/sysliblist
+    # OUI target order links libasmperl19.ohso BEFORE client_sharedlib
+    # builds libclntshcore.so -> fresh homes die 'cannot find
+    # -lclntshcore' (rac2 run-6; rac1 only passed on stale residue).
+    # Build the core client libs first when absent (idempotent).
+    test -e {{ oracle_home }}/lib/libclntshcore.so || \
+      (cd {{ oracle_home }}/rdbms/lib && make -f ins_rdbms.mk client_sharedlib)
   become_user: oracle
   when:
     - db_phase == 'software'
