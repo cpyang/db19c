@@ -73,6 +73,12 @@
       when: db19_registered.rc != 0
 
     - name: Add instance {{ db_sid_prefix }}2 on node2
+      # -nodeName must be the CRS SHORT nodename (tests-lab proven form);
+      # the FQDN that 11.2 grammar tolerated makes 19c dbca fail with the
+      # misleading DBT-10203 admin-managed-only error (05 run-3
+      # 2026-10-26; the DB was admin-managed all along). Comments live
+      # HERE, never inside shell blocks beginning with {{ }} - ansible
+      # shlex-parses those, and an apostrophe becomes an unbalanced quote.
       shell: |
         {{ grid_home }}/bin/srvctl status database -d {{ db_name }} \
           | grep -q "{{ db_sid_prefix }}2" && echo ALREADY && exit 0
@@ -81,10 +87,6 @@
         export ORACLE_SID={{ db_sid_prefix }}1
         {{ oracle_home }}/bin/dbca -silent -addInstance \
           -gdbName {{ db_name }} \
-          # CRS nodename = SHORT name (tests-lab proven form). The FQDN
-          # db11g's 11.2 grammar tolerated makes 19c dbca fail with the
-          # misleading DBT-10203 'admin managed only' (05 run-3,
-          # 2026-10-26: DB was admin-managed all along).
           -nodeName {{ hostvars[groups['rac'][1]].short_name }} \
           -instanceName {{ db_sid_prefix }}2 \
           -sysDBAUserName sys -sysDBAPassword {{ sys_password }}
