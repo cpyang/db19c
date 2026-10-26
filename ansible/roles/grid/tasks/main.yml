@@ -235,10 +235,17 @@
     {{ grid_home }}/bin/crsctl check cluster -all | grep -c ONLINE | grep -qv 0
     {{ grid_home }}/bin/olsnodes -n -s
     {{ grid_home }}/bin/crsctl query css votedisk
-    # lsdg via bare become_user:grid has no +ASM env -> misleading '0';
-    # CRS resources are the ground truth and need no client env.
-    {{ grid_home }}/bin/crsctl stat res ora.CRS.dg ora.DATA.dg ora.FRA.dg -et | grep -c "STATE=ONLINE"
+    # Flex ASM: DGs have no standalone res STATE; verify through the ASM
+    # instance itself. env REQUIRED — bare become_user:grid lsdg exits 0
+    # on nothing and prints a misleading '0' (di 2026-10-26; -et flag and
+    # ora.<dg>.dg resource queries are both dead ends in this model).
+    # name is the LAST column of lsdg, MOUNTED the first — anchor on both
+    {{ grid_home }}/bin/asmcmd lsdg | awk '/MOUNTED/ && $NF ~ /^(CRS|DATA|FRA)\/?$/ {n++} END {print n+0}' | grep -qv 0
   become_user: grid
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    ORACLE_SID: "+ASM{{ node_num }}"
+    ORACLE_BASE: /u01/app/grid
   register: verify_out
   changed_when: false
   when: grid_phase == 'dgs'
