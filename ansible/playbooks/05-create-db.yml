@@ -52,6 +52,7 @@
         -storageType ASM
         -diskGroupName {{ asm_diskgroup_data }}
         -recoveryGroupName {{ asm_diskgroup_fra }}
+        -recoveryFileSize 9G
         -characterSet {{ db_charset }}
         -nationalCharacterSet {{ db_ncharset }}
         -memoryPercentage {{ db_memory_percentage }}
