@@ -121,9 +121,9 @@
     # setuid char is POSITION 3 of the mode string ('-rwsr-s--x'); the old
     # '^.-ws' pattern matched nothing and made this task always re-run
     # root.sh then fail its own check (rac1 09:37, twice).
-    stat -c '%A' {{ oracle11_home }}/bin/oracle | grep -q '^..s' || \
+    stat -c '%A' {{ oracle11_home }}/bin/oracle | grep -q '^...s' || \
       ( {{ oracle11_home }}/root.sh >/tmp/db11root.out 2>&1; \
-        stat -c '%A' {{ oracle11_home }}/bin/oracle | grep '^..s' )
+        stat -c '%A' {{ oracle11_home }}/bin/oracle | grep '^...s' )
   changed_when: true
   when: db11_phase == 'root'
 
