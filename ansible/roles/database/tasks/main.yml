@@ -133,10 +133,11 @@
   # (04 run-3 2026-10-26). Static fstatat wrappers appended to the home's
   # sysliblist resolve it; RU 19.31 replaces the object at patch phase.
   shell: |
-    printf '#include <sys/syscall.h>\n#include <sys/stat.h>\n#include <fcntl.h>\n#include <unistd.h>\nstatic int xst(const char *p, struct stat *s, int f){return syscall(SYS_newfstatat, AT_FDCWD, p, s, f);}\nint stat(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint stat64(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat64(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\n' > {{ grid_install_tmp }}/statshim.c
+    printf '#include <sys/syscall.h>\n#include <sys/stat.h>\n#include <sys/statfs.h>\n#include <fcntl.h>\n#include <unistd.h>\n#include <sys/sysmacros.h>\nstatic int xst(const char *p, struct stat *s, int f){return syscall(SYS_newfstatat, AT_FDCWD, p, s, f);}\nint stat(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint stat64(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat64(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint fstat(int fd, struct stat *s){return syscall(SYS_newfstatat, fd, "", s, AT_EMPTY_PATH);}\nint fstat64(int fd, struct stat *s){return fstat(fd,s);}\nint mknod(const char *p, mode_t m, dev_t d){return syscall(SYS_mknod, p, m, d);}\n' > {{ grid_install_tmp }}/statshim.c
     cc -fPIC -c {{ grid_install_tmp }}/statshim.c -o {{ grid_install_tmp }}/statshim.o
-    # run-5 lesson: glibc>=2.33 does not EXPORT fstatat either — the
-    # wrapper must issue SYS_newfstatat directly via syscall(2).
+    # glibc>=2.33 exports NEITHER stat/lstat/fstat NOR mknod (KAP-built
+    # 19.3 objects in libnnzst + libjavavm reference them; run-5/6
+    # 2026-10-26). syscall(2) wrappers close the whole family at once.
     ar rcs {{ oracle_home }}/lib/libstatshim.a {{ grid_install_tmp }}/statshim.o
     grep -q statshim {{ oracle_home }}/lib/sysliblist || echo -n ' -lstatshim' >> {{ oracle_home }}/lib/sysliblist
   become_user: oracle
