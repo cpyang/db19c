@@ -235,7 +235,9 @@
     {{ grid_home }}/bin/crsctl check cluster -all | grep -c ONLINE | grep -qv 0
     {{ grid_home }}/bin/olsnodes -n -s
     {{ grid_home }}/bin/crsctl query css votedisk
-    {{ grid_home }}/bin/asmcmd lsdg | grep -cE "^ *{{ asm_diskgroup_crs }}|^ *{{ asm_diskgroup_data }}|^ *{{ asm_diskgroup_fra }}"
+    # lsdg via bare become_user:grid has no +ASM env -> misleading '0';
+    # CRS resources are the ground truth and need no client env.
+    {{ grid_home }}/bin/crsctl stat res ora.CRS.dg ora.DATA.dg ora.FRA.dg -et | grep -c "STATE=ONLINE"
   become_user: grid
   register: verify_out
   changed_when: false
