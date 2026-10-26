@@ -14,12 +14,21 @@
   roles:
     - database
 
-- name: 19c DB software + RU (per node; parallel is SAFE here)
+- name: 19c DB software (per node; parallel is SAFE here)
   hosts: rac
   gather_facts: false
   become: true
   vars:
     db_stage: software
+  roles:
+    - database
+
+- name: 19c DB RU apply (per node, opatch apply -local)
+  hosts: rac
+  gather_facts: false
+  become: true
+  vars:
+    db_stage: patch
   roles:
     - database
 

@@ -108,18 +108,20 @@
     mode: '0600'
   when: db_phase == 'software'
 
-- name: Install DB software + RU (per node, local image install)
+- name: Install DB software (per node, local image install, base 19.3)
+  # NO -applyRU here: its validation requires the home UNregistered
+  # (INS-32826) while its opatchauto step requires it REGISTERED
+  # (OPatch err 135) — proven circularity in tests lab. RU lands in the
+  # 'patch' phase via opatch apply -local per node instead.
   command: >-
     {{ oracle_home }}/runInstaller -silent
-    -applyRU {{ ru_stage_dir }}/db/{{ db_ru_id }}
     -responseFile {{ grid_install_tmp }}/db_install19.rsp
     oracle.install.db.CLUSTER_NODES={{ short_name }}
     -ignorePrereqFailure
   become_user: oracle
   environment:
-    # base-19.3 CVU has no OL9 entry -> INS-08101 NPE; the marker keeps the
-    # pre-patch phase quiet (tests lab §db). -applyRU lands RU 19.31 whose
-    # CVU knows OL9 natively.
+    # 19.3 base CVU has no OL9 entry -> INS-08101 NPE (same class as OL8's);
+    # the DISTID marker keeps the preinstall check quiet (tests lab §db).
     CV_ASSUME_DISTID: OEL7.8
     TMPDIR: "{{ grid_install_tmp }}"
   register: db_install
@@ -128,6 +130,17 @@
   when:
     - db_phase == 'software'
     - db_bin.stat.size | default(0) < 1000000
+
+# ------------------------------------------------------------------ patch
+- name: Apply DB RU with OPatch (per node, post-install)
+  shell: |
+    {{ oracle_home }}/OPatch/opatch lspatches 2>/dev/null | grep -q "^{{ db_ru_id }};" || \
+      (cd {{ ru_stage_dir }}/db/{{ db_ru_id }} && {{ oracle_home }}/OPatch/opatch apply -silent -local)
+  become_user: oracle
+  register: db_patch
+  changed_when: "'already installed' not in db_patch.stdout | default('')"
+  timeout: 3600
+  when: db_phase == 'patch'
 
 # ------------------------------------------------------------------ root.sh
 - name: DB home already rooted? (setuid oracle binary)

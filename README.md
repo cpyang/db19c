@@ -159,9 +159,12 @@ node1 before node2 — do not remove the play ordering.
 ### Database 19c (`04`)
 - **per-node local install** (`CLUSTER_NODES=<self>`): the
   node1-propagates model dies on base-19.3 CVU remote checks
-  (INS-06006/PRVF-5311, tests 2026-10-16 postmortem); `runInstaller
-  -applyRU 39034528` + `CV_ASSUME_DISTID=OEL7.8`; detach-sweep guard for
-  re-runs (INS-32826); verify = bin/oracle size + setuid + `lspatches`
+  (INS-06006/PRVF-5311, tests 2026-10-16 postmortem); base 19.3
+  `runInstaller` + `CV_ASSUME_DISTID=OEL7.8`, then RU 19.31 via
+  `opatch apply -local` per node — NOT `-applyRU` (validate needs the
+  home unregistered, opatchauto needs it registered: circular, proven in
+  tests). Detach-sweep guard for re-runs (INS-32826); verify =
+  bin/oracle size + setuid + `lspatches`
 
 ### Database 11g (`04b`)
 - per-node software-only install, **no CLUSTER_NODES** (local image;
