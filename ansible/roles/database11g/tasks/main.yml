@@ -134,7 +134,7 @@
     # 11g 'oracle -v' prints NOTHING on EL9 (rc 0 = loads+inits fine;
     # banner path hits retired glibc internals). rc is the assertion.
     {{ oracle11_home }}/bin/oracle -v >/dev/null 2>&1
-    {{ oracle11_home }}/bin/sqlplus -V 2>&1 | grep -q 'SQL*Plus'
+    {{ oracle11_home }}/bin/sqlplus -V 2>&1 | grep -q 'SQL\*Plus'
   environment:
     ORACLE_HOME: "{{ oracle11_home }}"
     LD_LIBRARY_PATH: "{{ oracle11_home }}/lib"
