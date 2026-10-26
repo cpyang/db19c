@@ -448,7 +448,14 @@
     # pkname answers MULTILINE on EL9 lsblk — take line 1 or dev becomes garbage
     dev=$(lsblk -no pkname "$pv" | head -1)
     num=${pv##*[a-z]}
-    growpart /dev/$dev $num || [ $? -eq 2 ] || exit 1
+    # growpart rc semantics: 0 grown, 2 already-max, 1 WITH 'NOCHANGE' text
+    # (idempotent rerun on an already-grown disk); anything else is fatal.
+    out=$(growpart /dev/$dev $num 2>&1) && rc=0 || rc=$?
+    case $rc in
+      0|2) : ;;
+      1) echo "$out" | grep -q NOCHANGE || exit 1 ;;
+      *) exit 1 ;;
+    esac
     # partprobe is NOT on the minimal box (parted pkg); partx is util-linux:
     partx -u /dev/$dev 2>/dev/null || true
     udevadm settle; sleep 2   # pvresize otherwise sees stale size
