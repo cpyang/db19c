@@ -126,6 +126,21 @@
       register: db19_status
       changed_when: true
 
+    - name: Open PDBs cluster-wide and persist state
+      # dbca leaves -pdbName pluggables MOUNTED on a fresh RAC CDB;
+      # open + save state so restarts (and failovers) come back usable.
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        sqlplus -s / as sysdba <<'SQL'
+        alter pluggable database all open;
+        alter pluggable database all save state;
+        exit
+        SQL
+      become_user: oracle
+      environment:
+        ORACLE_SID: "{{ db_sid_prefix }}1"
+      changed_when: true
+
     - name: Assert db19c has 2 running instances
       assert:
         that: (db19_status.stdout | regex_findall('is running')) | length == 2
