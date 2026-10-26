@@ -234,7 +234,7 @@
   shell: |
     {{ grid_home }}/bin/crsctl check cluster -all | grep -c ONLINE | grep -qv 0
     {{ grid_home }}/bin/olsnodes -n -s
-    {{ grid_home }}/bin/crsctl query votedisk
+    {{ grid_home }}/bin/crsctl query css votedisk
     {{ grid_home }}/bin/asmcmd lsdg | grep -cE "^ *{{ asm_diskgroup_crs }}|^ *{{ asm_diskgroup_data }}|^ *{{ asm_diskgroup_fra }}"
   become_user: grid
   register: verify_out
