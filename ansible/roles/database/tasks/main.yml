@@ -65,6 +65,17 @@
   become_user: oracle
   when: db_phase == 'software'
 
+- name: Ensure DB RU staging dir exists (oracle-owned)
+  # /u01/patches is grid-owned from the GI phase; oracle cannot mkdir
+  # inside it -> unarchive rc50 'Permission denied', 04 run-1 2026-10-26.
+  file:
+    path: "{{ ru_stage_dir }}/db"
+    state: directory
+    owner: oracle
+    group: "{{ oracle_installer_group }}"
+    mode: '0775'
+  when: db_phase == 'software'
+
 - name: Extract DB RU (per node — install is local)
   unarchive:
     src: "{{ oracle_stage_dir }}/{{ db_ru_zip }}"
