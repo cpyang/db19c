@@ -70,31 +70,48 @@
       changed_when: true
       when: db19_registered.rc != 0
 
-    - name: Extend db19c to two instances (srvctl path; dbca OPS-ssh is broken)
-      # Both dbca verbs (create -nodelist / -addInstance) die in INS-06006
-      # on EL9 even though every ssh probe returns rc=0 and the trace logs
-      # the node as 'reachable' (2026-10-26, ~10 runs). The documented
-      # SI-to-RAC conversion via srvctl avoids the OPS layer entirely:
-      # flip cluster_database in spfile, add the CRS instance, give the
-      # new SID sid-specific instance_number + undo, restart fleet-managed.
+    - name: Extend db19c to two instances (srvctl manual RAC registration)
+      # dbca cluster verbs (create -nodelist / -addInstance) die in
+      # INS-06006 on EL9 even though every ssh probe returns rc0 and the
+      # trace logs the node as reachable - the OPS layer lies (~10 runs,
+      # 2026-10-26/27). This CRS-local sequence is the VERIFIED recipe
+      # (skill refs srvctl-manual-rac-registration.md): spfile stamping in
+      # the OPEN session, srvctl re-register as oracle owner (root gets
+      # PRKH-1014, grid CRS-0245), add instance per node, nomount-overlay
+      # fixes instance_number (ORA-29760 otherwise), srvctl start.
       shell: |
+        set -x
         if {{ grid_home }}/bin/srvctl status database -d {{ db_name }} \
              | grep -q "{{ db_sid_prefix }}2"; then echo ALREADY; exit 0; fi
         export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
         export ORACLE_SID={{ db_sid_prefix }}1
-        sqlplus -s / as sysdba <<SQL
-        alter system set cluster_database=true scope=spfile sid='*';
+        sqlplus -s / as sysdba <<'SQL'
         create undo tablespace UNDOTBS2 datafile '+DATA' size 512M autoextend on maxsize 8G;
-        exit
-        SQL
-        {{ grid_home }}/bin/srvctl add instance -db {{ db_name }} -i {{ db_sid_prefix }}2 -n {{ hostvars[groups['rac'][1]].short_name }}
-        sqlplus -s / as sysdba <<SQL
-        alter system set instance_number=2 scope=spfile sid='{{ db_sid_prefix }}2';
         alter system set undo_tablespace='UNDOTBS2' scope=spfile sid='{{ db_sid_prefix }}2';
+        alter system set instance_number=2 scope=spfile sid='{{ db_sid_prefix }}2';
+        alter system set cluster_database=true scope=spfile sid='*';
         exit
         SQL
-        {{ grid_home }}/bin/srvctl stop database -d {{ db_name }} -f
+        {{ grid_home }}/bin/srvctl stop database -d {{ db_name }} -f 2>/dev/null
+        SPF=$({{ grid_home }}/bin/srvctl config database -d {{ db_name }} 2>/dev/null | awk -F': ' '/Spfile/{print $2}')
+        if [ -z "$SPF" ]; then SPF=$({{ grid_home }}/bin/asmcmd ls +DATA/{{ db_name | upper }}/PARAMETERFILE 2>/dev/null | grep spfile | head -1); SPF="+DATA/{{ db_name | upper }}/PARAMETERFILE/$SPF"; fi
+        echo SPFILE=$SPF
+        {{ grid_home }}/bin/srvctl remove database -d {{ db_name }} -f 2>/dev/null
+        # NO -i/-n on add database: single-dash -n parses as a -dbname prefix (PRKF-1125)
+        {{ grid_home }}/bin/srvctl add database -db {{ db_name }} -o {{ oracle_home }} -p "$SPF"
+        {{ grid_home }}/bin/srvctl add instance -db {{ db_name }} -i {{ db_sid_prefix }}1 -n {{ hostvars[groups['rac'][0]].short_name }}
+        {{ grid_home }}/bin/srvctl add instance -db {{ db_name }} -i {{ db_sid_prefix }}2 -n {{ hostvars[groups['rac'][1]].short_name }}
+        # nomount-overlay: db191 needs its instance_number in spfile (ORA-29760)
+        printf 'spfile=%s\ndb_name={{ db_name }}\ninstance_number=1\ncluster_database=false\n' "$SPF" > /tmp/{{ db_name }}_p1.ora
+        sqlplus -s / as sysdba <<'SQL'
+        startup nomount pfile='/tmp/{{ db_name }}_p1.ora'
+        alter system set instance_number=1 scope=spfile sid='{{ db_sid_prefix }}1';
+        alter system set cluster_database=true scope=spfile sid='*';
+        shutdown immediate
+        exit
+        SQL
         {{ grid_home }}/bin/srvctl start database -d {{ db_name }}
+        {{ grid_home }}/bin/srvctl status database -d {{ db_name }} | grep -c "is running"
       become_user: oracle
       register: extend_out
       timeout: 3600
