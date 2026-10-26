@@ -133,11 +133,13 @@
   # (04 run-3 2026-10-26). Static fstatat wrappers appended to the home's
   # sysliblist resolve it; RU 19.31 replaces the object at patch phase.
   shell: |
-    printf '#include <sys/syscall.h>\n#include <sys/stat.h>\n#include <sys/statfs.h>\n#include <fcntl.h>\n#include <unistd.h>\n#include <sys/sysmacros.h>\nstatic int xst(const char *p, struct stat *s, int f){return syscall(SYS_newfstatat, AT_FDCWD, p, s, f);}\nint stat(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint stat64(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat64(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint fstat(int fd, struct stat *s){return syscall(SYS_newfstatat, fd, "", s, AT_EMPTY_PATH);}\nint fstat64(int fd, struct stat *s){return fstat(fd,s);}\nint mknod(const char *p, mode_t m, dev_t d){return syscall(SYS_mknod, p, m, d);}\n' > {{ grid_install_tmp }}/statshim.c
+    printf '#define _GNU_SOURCE 1\n#include <sys/syscall.h>\n#include <sys/stat.h>\n#include <sys/statfs.h>\n#include <fcntl.h>\n#include <unistd.h>\n#include <sys/sysmacros.h>\nstatic int xst(const char *p, struct stat *s, int f){return syscall(SYS_newfstatat, AT_FDCWD, p, s, f);}\nint stat(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint stat64(const char *p, struct stat *s){return xst(p,s,0);}\nint lstat64(const char *p, struct stat *s){return xst(p,s,AT_SYMLINK_NOFOLLOW);}\nint fstat(int fd, struct stat *s){return syscall(SYS_newfstatat, fd, "", s, AT_EMPTY_PATH);}\nint fstat64(int fd, struct stat *s){return fstat(fd,s);}\nint mknod(const char *p, mode_t m, dev_t d){return syscall(SYS_mknod, p, m, d);}\n' > {{ grid_install_tmp }}/statshim.c
     cc -fPIC -c {{ grid_install_tmp }}/statshim.c -o {{ grid_install_tmp }}/statshim.o
-    # glibc>=2.33 exports NEITHER stat/lstat/fstat NOR mknod (KAP-built
-    # 19.3 objects in libnnzst + libjavavm reference them; run-5/6
-    # 2026-10-26). syscall(2) wrappers close the whole family at once.
+    # EL9 glibc exports stat/lstat/fstat ONLY as weak @GLIBC_2.33
+    # wrappers; unversioned KAP-built 19.3 objects (libnnzst, libjavavm)
+    # fail to bind them -> 'undefined reference' (04 run-5/6,
+    # 2026-10-26). Strong syscall(2)-based definitions in this archive
+    # resolve the whole family at archive-scan time.
     ar rcs {{ oracle_home }}/lib/libstatshim.a {{ grid_install_tmp }}/statshim.o
     grep -q statshim {{ oracle_home }}/lib/sysliblist || echo -n ' -lstatshim' >> {{ oracle_home }}/lib/sysliblist
   become_user: oracle
