@@ -145,7 +145,12 @@
       HOME: /home/oracle
   tasks:
     - name: Check whether db11 is already registered
-      command: "{{ grid_home }}/bin/srvctl config database -d {{ db11_name }}"
+      # physical-existence OR registration suppresses re-create: the
+      # register step (not this play) owns CRS, and a dbca -createDatabase
+      # over an existing +DATA/DB11 would abort the play.
+      shell: |
+        {{ grid_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 \
+          || {{ grid_home }}/bin/asmcmd ls +{{ asm_diskgroup_data }}/{{ db11_name | upper }}/DATAFILE >/dev/null 2>&1
       become_user: grid
       register: db11_registered
       failed_when: false
@@ -194,20 +199,22 @@
       failed_when: false
 
     - name: Register db11 with GI 19c (if not registered yet)
-      # 19c srvctl grammar: no -r (type inferred from instance count); NO
-      # -i/-n on add database (single-dash prefixes collide with -dbname ->
-      # PRKO-2003/PRKF-1125, 2026-10-27). The lone instance comes from
-      # add instance, node must be the CRS SHORT nodename.
+      # MUST register from the 11g home's srvctl: GI-19c srvctl refuses to
+      # create an 11.2.0.4-versioned resource (PRCD-1298 version mismatch,
+      # 2026-10-27). The 11g srvctl talks to the same CRS stack; later
+      # stop/start/remove via the 19c srvctl work fine on the resource.
+      # No -i/-n/-r on add (prefix trap + -r SINGLE gone); instance via
+      # add instance with the CRS SHORT nodename.
       shell: |
-        {{ grid_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 && exit 0
+        {{ oracle11_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 && exit 0
         SP=""
         {% if sp11.stdout | trim %}
         SP="-p +{{ asm_diskgroup_data }}/{{ db11_name | upper }}/PARAMETERFILE/{{ sp11.stdout | trim }}"
         {% endif %}
-        {{ grid_home }}/bin/srvctl add database -d {{ db11_name }} \
+        {{ oracle11_home }}/bin/srvctl add database -d {{ db11_name }} \
           -o {{ oracle11_home }} $SP -a {{ asm_diskgroup_data }}
-        {{ grid_home }}/bin/srvctl add instance -db {{ db11_name }} -i {{ db11_sid }} -n {{ hostvars[groups['rac'][0]].short_name }}
-      become_user: grid
+        {{ oracle11_home }}/bin/srvctl add instance -d {{ db11_name }} -i {{ db11_sid }} -n {{ hostvars[groups['rac'][0]].short_name }}
+      become_user: oracle
       register: db11_add
       changed_when: db11_add.rc == 0
 
