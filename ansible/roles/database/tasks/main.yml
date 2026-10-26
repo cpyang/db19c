@@ -92,6 +92,13 @@
   register: db_bin
   when: db_phase == 'software'
 
+- name: Decide whether link/install must run
+  # size guard OR explicit -e db_force_install=true (aborted-but-
+  # prelinked homes need the make targets replayed; 04 run-3 stat-shim)
+  set_fact:
+    db_link_state: "{{ (db_bin.stat.size | default(0) < 1000000) or (db_force_install | default(false)) }}"
+  when: db_phase == 'software'
+
 - name: Detach stale DB home registrations (recovery guard)
   # INS-32826 comes from TWO registries: central inventory entries surviving
   # a wiped home AND the home-local $OH/inventory marker detachHome itself
@@ -119,6 +126,24 @@
     mode: '0600'
   when: db_phase == 'software'
 
+- name: Install EL9 glibc stat-shim into the DB home lib path
+  # 19.3's KAP-built libnnzst19.a objects reference the glibc<2.33 `stat`
+  # symbol (EL9 dropped it from the ABI) -> linking rdbms/lib/orion is
+  # FATAL and kills all_no_orcl even though bin/oracle ships pre-linked
+  # (04 run-3 2026-10-26). Static fstatat wrappers appended to the home's
+  # sysliblist resolve it; RU 19.31 replaces the object at patch phase.
+  shell: |
+    printf '#include <sys/stat.h>\n#include <fcntl.h>\nint stat(const char *p, struct stat *s){return fstatat(AT_FDCWD,p,s,0);}\nint lstat(const char *p, struct stat *s){return fstatat(AT_FDCWD,p,s,AT_SYMLINK_NOFOLLOW);}\n' > {{ grid_install_tmp }}/statshim.c
+    cc -c -fPIC {{ grid_install_tmp }}/statshim.c -o {{ grid_install_tmp }}/statshim.o
+    ar rcs {{ oracle_home }}/lib/libstatshim.a {{ grid_install_tmp }}/statshim.o
+    grep -q statshim {{ oracle_home }}/lib/sysliblist || echo -n ' -lstatshim' >> {{ oracle_home }}/lib/sysliblist
+  args:
+    creates: "{{ oracle_home }}/lib/libstatshim.a"
+  become_user: oracle
+  when:
+    - db_phase == 'software'
+    - db_link_state
+
 - name: Install DB software (per node, local image install, base 19.3)
   # NO -applyRU here: its validation requires the home UNregistered
   # (INS-32826) while its opatchauto step requires it REGISTERED
@@ -140,7 +165,7 @@
   timeout: 5400
   when:
     - db_phase == 'software'
-    - db_bin.stat.size | default(0) < 1000000
+    - db_link_state
 
 # ------------------------------------------------------------------ patch
 - name: Apply DB RU with OPatch (per node, post-install)
