@@ -46,8 +46,10 @@
   stat:
     path: "/dev/oracleasm/disks/{{ item }}"
   loop: [CRS, DATA, FRA]
-  failed_when: not (item.stat.exists)
   register: asm_links
+  # in a loop, `item` is the loop string; the per-item result is under
+  # the REGISTERED name (db11g storage-role form — do not use item.stat)
+  failed_when: not asm_links.stat.exists
   when: grid_phase == 'check'
 
 # ------------------------------------------------------------------ software
