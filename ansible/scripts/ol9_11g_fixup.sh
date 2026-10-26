@@ -29,9 +29,8 @@ PHASE=${1:?usage: $0 pre|post ORACLE_HOME}
 OH=${2:-${ORACLE_HOME:-}}
 SUDO=""
 [ "$(id -u)" != "0" ] && SUDO="sudo"
-[ -n "$OH" ] || { echo "ORACLE_HOME required for post"; exit 1; }
 
-if [ "$PHASE" = "pre" ]; then
+if [ "$PHASE" = "pre" ]; then   # pre is home-agnostic (system fixes only)
   if [ ! -e /usr/lib64/libpthread_nonshared.a ]; then
     printf 'int __oracle_compat_stub(void){return 0;}\n' > /tmp/pstub.c
     $SUDO cc -c /tmp/pstub.c -o /tmp/pstub.o
@@ -50,6 +49,7 @@ if [ "$PHASE" = "pre" ]; then
 fi
 
 # ---------------- post: repair the aborted Make phase ----------------
+[ -n "$OH" ] || { echo "ORACLE_HOME required for post"; exit 1; }
 export ORACLE_HOME=$OH LD_LIBRARY_PATH=$OH/lib
 if [ -s "$OH/bin/oracle" ]; then
   echo "oracle binary OK ($(stat -c %s $OH/bin/oracle) bytes) - no fixup needed"
