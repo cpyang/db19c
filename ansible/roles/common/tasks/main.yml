@@ -448,6 +448,7 @@
     dev=$(basename "$(lsblk -no pkname "$pv")")
     num=${pv##*[a-z]}
     growpart /dev/$dev $num || [ $? -eq 2 ] || exit 1
+    partprobe /dev/$dev; sleep 2   # else pvresize sees stale size (2-run bug)
     pvresize "$pv" >/dev/null
     lvextend -l +100%FREE /dev/mapper/vg_main-lv_root 2>/dev/null || true
     xfs_growfs / >/dev/null
