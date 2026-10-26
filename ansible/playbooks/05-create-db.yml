@@ -152,7 +152,7 @@
       shell: |
         export ORACLE_HOME={{ oracle11_home }}
         {{ oracle11_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 \
-          || ls /u01/app/oracle/oradata/{{ db11_name | upper }}/control01.ctl >/dev/null 2>&1
+          || ls /u01/app/oracle/oradata/{{ db11_name }}/control01.ctl >/dev/null 2>&1
       become_user: oracle
       register: db11_registered
       failed_when: false
@@ -207,7 +207,7 @@
       shell: |
         {{ oracle11_home }}/bin/srvctl config database -d {{ db11_name }} >/dev/null 2>&1 && exit 0
         {{ oracle11_home }}/bin/srvctl add database -d {{ db11_name }} \
-          -o {{ oracle11_home }}
+          -o {{ oracle11_home }} -p {{ oracle11_home }}/dbs/spfile{{ db11_sid }}.ora
         {{ oracle11_home }}/bin/srvctl add instance -d {{ db11_name }} -i {{ db11_sid }} -n {{ hostvars[groups['rac'][0]].short_name }}
       become_user: oracle
       environment: "{{ db11_env }}"
