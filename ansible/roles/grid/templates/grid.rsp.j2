@@ -24,7 +24,7 @@ oracle.install.crs.config.gpnp.configureGNS=false
 # root.sh; the tests lab used AUTO+hosts and lived, but static is the
 # smaller failure surface (README troubleshooting line).
 oracle.install.crs.config.autoConfigureClusterNodeVIP=false
-oracle.install.crs.config.clusterNodes={% for n in groups['rac'] %}{{ hostvars[n].short_name }}:{{ hostvars[n].short_name }}-vip{{ if not loop.last }},{{ endif }}{% endfor %}
+oracle.install.crs.config.clusterNodes={% for n in groups['rac'] %}{{ hostvars[n].short_name }}:{{ hostvars[n].short_name }}-vip{% if not loop.last %},{% endif %}{% endfor %}
 
 # NIC roles resolved BY ADDRESS at runtime (never ethX — db11g lesson).
 # :1 = public, :5 = cluster interconnect (ASM+private).
